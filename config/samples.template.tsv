@@ -1,0 +1,4 @@
+sample_id	fastq	run_id	barcode	description
+sample_001	/absolute/path/to/sample_001.fastq.gz	run_001	barcode01	Real Nanopore sample
+sample_002	/absolute/path/to/sample_002_part_001.fastq.gz	run_001	barcode02	First FASTQ chunk
+sample_002	/absolute/path/to/sample_002_part_002.fastq.gz	run_001	barcode02	Second FASTQ chunk

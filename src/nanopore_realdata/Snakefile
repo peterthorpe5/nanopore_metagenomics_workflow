@@ -1,0 +1,226 @@
+"""Snakemake DAG for real Oxford Nanopore sample classification."""
+
+from pathlib import Path
+
+from nanopore_realdata.config import load_workflow_config
+from nanopore_realdata.workflow import (
+    aggregate_results,
+    build_host_index,
+    classify_batch,
+    host_deplete_batch,
+    preflight,
+)
+
+
+CONFIG_PATH = Path(config["workflow_config_path"]).resolve()
+WORKFLOW = load_workflow_config(config_path=CONFIG_PATH)
+OUTPUT_ROOT = WORKFLOW.output_directory
+SAMPLE_IDS = [sample.sample_id for sample in WORKFLOW.samples]
+
+PREFLIGHT = OUTPUT_ROOT / "00_preflight" / "preflight.json"
+HOST_INDEX = WORKFLOW.host_index or OUTPUT_ROOT / "00_preflight" / "host_reference.mmi"
+HOST_INDEX_COMPLETION = OUTPUT_ROOT / "00_preflight" / "host_index.complete.json"
+HOST_FASTQS = [
+    OUTPUT_ROOT / "01_host_depletion" / sample_id / "non_host.fastq.gz"
+    for sample_id in SAMPLE_IDS
+]
+HOST_SUMMARIES = [
+    OUTPUT_ROOT / "01_host_depletion" / sample_id / "host_removal_summary.tsv"
+    for sample_id in SAMPLE_IDS
+]
+HOST_STAGE = OUTPUT_ROOT / "01_host_depletion" / "stage.complete.json"
+
+KRAKEN_REPORTS = [
+    OUTPUT_ROOT / "02_classification" / "kraken2" / sample_id / "report.tsv"
+    for sample_id in SAMPLE_IDS
+]
+METABULI_REPORTS = [
+    OUTPUT_ROOT / "02_classification" / "metabuli" / sample_id / "report.tsv"
+    for sample_id in SAMPLE_IDS
+]
+KRAKEN_STAGE = OUTPUT_ROOT / "02_classification" / "kraken2" / "stage.complete.json"
+METABULI_STAGE = OUTPUT_ROOT / "02_classification" / "metabuli" / "stage.complete.json"
+KMERSUTRA_STAGES = [
+    OUTPUT_ROOT
+    / "02_classification"
+    / "kmersutra"
+    / sample_id
+    / "stage.complete.json"
+    for sample_id in SAMPLE_IDS
+]
+
+FINAL_ROOT = OUTPUT_ROOT / "03_final"
+FINAL_COMPLETION = FINAL_ROOT / "workflow.complete.json"
+FINAL_OUTPUTS = [
+    FINAL_ROOT / "sample_summary.tsv",
+    FINAL_ROOT / "classifier_taxon_reports.tsv.gz",
+    FINAL_ROOT / "kmersutra_species_calls.tsv.gz",
+    FINAL_ROOT / "README.txt",
+    FINAL_ROOT / "SHA256SUMS.tsv",
+    FINAL_COMPLETION,
+]
+
+
+rule all:
+    input:
+        [str(path) for path in FINAL_OUTPUTS]
+
+
+rule preflight:
+    input:
+        config=str(CONFIG_PATH),
+        samples=str(WORKFLOW.samples_path),
+        host_reference=str(WORKFLOW.host_reference),
+        fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
+    output:
+        str(PREFLIGHT)
+    resources:
+        mem_mb=2048,
+        runtime=30,
+    run:
+        preflight(config_path=Path(input.config), output_path=Path(output[0]))
+
+
+if WORKFLOW.host_index is None:
+    rule build_host_index:
+        input:
+            config=str(CONFIG_PATH),
+            preflight=str(PREFLIGHT),
+            reference=str(WORKFLOW.host_reference),
+        output:
+            index=str(HOST_INDEX),
+            completion=str(HOST_INDEX_COMPLETION),
+        threads: WORKFLOW.threads_host
+        resources:
+            mem_mb=WORKFLOW.memory_host_mb,
+            runtime=WORKFLOW.runtime_host_minutes,
+            database_stage=1,
+        run:
+            build_host_index(
+                config_path=Path(input.config),
+                output_index=Path(output.index),
+                output_completion=Path(output.completion),
+            )
+
+
+rule host_depletion:
+    input:
+        config=str(CONFIG_PATH),
+        preflight=str(PREFLIGHT),
+        host_index=str(HOST_INDEX),
+        fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
+    output:
+        fastqs=(
+            [str(path) for path in HOST_FASTQS]
+            if WORKFLOW.keep_non_host_fastq
+            else temp([str(path) for path in HOST_FASTQS])
+        ),
+        summaries=[str(path) for path in HOST_SUMMARIES],
+        stage=str(HOST_STAGE),
+    threads: WORKFLOW.threads_host
+    resources:
+        mem_mb=WORKFLOW.memory_host_mb,
+        runtime=WORKFLOW.runtime_host_minutes,
+        database_stage=1,
+    run:
+        host_deplete_batch(
+            config_path=Path(input.config),
+            host_index=Path(input.host_index),
+            stage_completion=Path(output.stage),
+        )
+
+
+rule classify_kraken2:
+    input:
+        config=str(CONFIG_PATH),
+        host_stage=str(HOST_STAGE),
+        fastqs=[str(path) for path in HOST_FASTQS],
+    output:
+        reports=[str(path) for path in KRAKEN_REPORTS],
+        stage=str(KRAKEN_STAGE),
+    threads: WORKFLOW.threads_kraken2
+    resources:
+        mem_mb=WORKFLOW.memory_kraken2_mb,
+        runtime=WORKFLOW.runtime_kraken2_minutes,
+        database_stage=1,
+    run:
+        classify_batch(
+            config_path=Path(input.config),
+            method="kraken2",
+            stage_completion=Path(output.stage),
+        )
+
+
+rule classify_metabuli:
+    input:
+        config=str(CONFIG_PATH),
+        host_stage=str(HOST_STAGE),
+        fastqs=[str(path) for path in HOST_FASTQS],
+    output:
+        reports=[str(path) for path in METABULI_REPORTS],
+        stage=str(METABULI_STAGE),
+    threads: WORKFLOW.threads_metabuli
+    resources:
+        mem_mb=WORKFLOW.memory_metabuli_mb,
+        runtime=WORKFLOW.runtime_metabuli_minutes,
+        database_stage=1,
+    run:
+        classify_batch(
+            config_path=Path(input.config),
+            method="metabuli",
+            stage_completion=Path(output.stage),
+        )
+
+
+rule classify_kmersutra:
+    input:
+        config=str(CONFIG_PATH),
+        kraken_stage=str(KRAKEN_STAGE),
+        metabuli_stage=str(METABULI_STAGE),
+        fastq=str(OUTPUT_ROOT / "01_host_depletion" / "{sample_id}" / "non_host.fastq.gz"),
+    output:
+        stage=str(
+            OUTPUT_ROOT
+            / "02_classification"
+            / "kmersutra"
+            / "{sample_id}"
+            / "stage.complete.json"
+        ),
+    threads: WORKFLOW.threads_kmersutra
+    resources:
+        mem_mb=WORKFLOW.memory_kmersutra_mb,
+        runtime=WORKFLOW.runtime_kmersutra_minutes,
+        kmersutra_worker=1,
+    run:
+        classify_batch(
+            config_path=Path(input.config),
+            method="kmersutra",
+            stage_completion=Path(output.stage),
+            sample_id=str(wildcards.sample_id),
+        )
+
+
+rule aggregate:
+    input:
+        config=str(CONFIG_PATH),
+        host_summaries=[str(path) for path in HOST_SUMMARIES],
+        kraken_reports=[str(path) for path in KRAKEN_REPORTS],
+        metabuli_reports=[str(path) for path in METABULI_REPORTS],
+        kraken_stage=str(KRAKEN_STAGE),
+        metabuli_stage=str(METABULI_STAGE),
+        kmersutra_stages=[str(path) for path in KMERSUTRA_STAGES],
+    output:
+        summary=str(FINAL_OUTPUTS[0]),
+        taxon_reports=str(FINAL_OUTPUTS[1]),
+        kmersutra_calls=str(FINAL_OUTPUTS[2]),
+        readme=str(FINAL_OUTPUTS[3]),
+        checksums=str(FINAL_OUTPUTS[4]),
+        completion=str(FINAL_OUTPUTS[5]),
+    resources:
+        mem_mb=4096,
+        runtime=60,
+    run:
+        aggregate_results(
+            config_path=Path(input.config),
+            completion_path=Path(output.completion),
+        )

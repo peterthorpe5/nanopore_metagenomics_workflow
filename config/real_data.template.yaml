@@ -1,0 +1,67 @@
+schema_version: 1
+
+run:
+  id: nanopore_real_data_v1
+  output_directory: /absolute/path/to/results/nanopore_real_data_v1
+
+inputs:
+  samples: /absolute/path/to/samples.tsv
+
+host:
+  reference: /absolute/path/to/host_reference.fasta
+  # Leave blank to build one persistent minimap2 index during the workflow.
+  index: ""
+
+databases:
+  kraken2: /absolute/path/to/kraken2_database
+  metabuli: /absolute/path/to/metabuli_database
+  # May be blank only when kmersutra.enabled is false.
+  kmersutra_panel: /absolute/path/to/species_kmer_panel.tsv.gz
+
+execution:
+  # Dundee compute jobs expose a job-specific, node-local XFS filesystem here.
+  scratch_root: /tmp
+  stage_resources: true
+  minimum_scratch_gb: 150
+  # Non-host FASTQ is deleted by Snakemake after all classifiers finish unless retained.
+  keep_non_host_fastq: false
+  # Kraken2 and Metabuli per-read assignments are compressed when retained.
+  keep_per_read_classifications: true
+
+resources:
+  host_threads: 16
+  kraken2_threads: 12
+  metabuli_threads: 12
+  kmersutra_threads: 24
+  host_memory_mb: 64000
+  kraken2_memory_mb: 96000
+  metabuli_memory_mb: 160000
+  kmersutra_memory_mb: 96000
+  host_runtime_minutes: 1440
+  kraken2_runtime_minutes: 2880
+  metabuli_runtime_minutes: 2880
+  # Normal three-day ceiling. Do not use the 4week QoS unless evidence shows it is needed.
+  kmersutra_runtime_minutes: 4320
+
+kraken2:
+  confidence: 0.0
+
+metabuli:
+  min_score: 0.008
+  max_ram_gb: 120
+
+kmersutra:
+  enabled: true
+  # A failed or timed-out KmerSutra sample is recorded, while the workflow continues.
+  failure_policy: continue
+  # Ends KmerSutra before the normal three-day Slurm allocation is killed.
+  timeout_minutes: 4200
+  screen_preset: exact
+  call_preset: lineage_aware
+  same_genus_reportable_min_fraction: 0.05
+  # TSV is the durable default; Parquet duplicates are optional and need pyarrow.
+  write_parquet_outputs: false
+
+provenance:
+  # Full input checksums are safest but add one complete read of each FASTQ.
+  checksum_inputs: true

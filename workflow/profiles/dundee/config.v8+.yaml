@@ -1,0 +1,11 @@
+executor: slurm
+jobs: 10
+latency-wait: 120
+rerun-incomplete: true
+keep-going: false
+printshellcmds: true
+default-resources:
+  slurm_account: barton
+  slurm_partition: barton
+  mem_mb: 4096
+  runtime: 720
