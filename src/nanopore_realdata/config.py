@@ -65,10 +65,13 @@ class WorkflowConfig:
     runtime_minimap2_minutes: int
     runtime_kmersutra_minutes: int
     kraken_confidence: float
+    kraken_failure_policy: str
     metabuli_min_score: float
     metabuli_max_ram_gb: int
+    metabuli_failure_policy: str
     minimap_min_mapq: int
     minimap_min_alignment: int
+    minimap_failure_policy: str
     kmersutra_screen_preset: str
     kmersutra_call_preset: str
     kmersutra_same_genus_fraction: float
@@ -76,6 +79,9 @@ class WorkflowConfig:
     kmersutra_enabled: bool
     kmersutra_failure_policy: str
     kmersutra_timeout_minutes: int
+    report_focus_taxa: tuple[str, ...]
+    report_top_n: int
+    report_max_table_rows: int
     checksum_inputs: bool
     samples: tuple[Sample, ...]
 
@@ -113,6 +119,7 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     metabuli = _mapping(raw, "metabuli")
     kmersutra = _mapping(raw, "kmersutra")
     provenance = _mapping(raw, "provenance")
+    reporting = _optional_mapping(raw, "reporting")
     kmersutra_enabled = _boolean(kmersutra, "enabled")
     minimap2 = _mapping(raw, "minimap2")
 
@@ -126,35 +133,39 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     )
     host_reference = _optional_path(host, "reference", base=base, must_exist=True)
     host_index = _optional_path(host, "index", base=base, must_exist=True)
-    kraken_database = _path(databases, "kraken2", base=base, must_exist=True)
-    metabuli_database = _path(databases, "metabuli", base=base, must_exist=True)
+    # Classifier resources are deliberately resolved without requiring them to
+    # exist at configuration-load time. Their readiness is assessed per branch
+    # during preflight so one unavailable classifier cannot suppress all other
+    # results or the final partial-results report.
+    kraken_database = _path(databases, "kraken2", base=base, must_exist=False)
+    metabuli_database = _path(databases, "metabuli", base=base, must_exist=False)
     kmersutra_panel = _optional_path(
         databases,
         "kmersutra_panel",
         base=base,
-        must_exist=True,
+        must_exist=False,
     )
     minimap_reference = _path(
         minimap2,
         "reference",
         base=base,
-        must_exist=True,
+        must_exist=False,
     )
     minimap_index = _optional_path(
         minimap2,
         "index",
         base=base,
-        must_exist=True,
+        must_exist=False,
     )
     scratch_root = _path(execution, "scratch_root", base=base, must_exist=True)
 
-    if not kraken_database.is_dir():
+    if kraken_database.exists() and not kraken_database.is_dir():
         raise ValueError(f"Kraken2 database must be a directory: {kraken_database}")
-    if not metabuli_database.is_dir():
+    if metabuli_database.exists() and not metabuli_database.is_dir():
         raise ValueError(f"Metabuli database must be a directory: {metabuli_database}")
     if kmersutra_enabled and kmersutra_panel is None:
         raise ValueError("kmersutra_panel is required when KmerSutra is enabled")
-    if kmersutra_panel is not None and not kmersutra_panel.is_file():
+    if kmersutra_panel is not None and kmersutra_panel.exists() and not kmersutra_panel.is_file():
         raise ValueError(f"KmerSutra panel must be a file: {kmersutra_panel}")
     if input_read_state == "raw" and host_reference is None:
         raise ValueError("host.reference is required when inputs.read_state is raw")
@@ -162,9 +173,9 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         raise ValueError(f"Host minimap2 index must be a file: {host_index}")
     if host_reference is not None and not host_reference.is_file():
         raise ValueError(f"Host reference must be a file: {host_reference}")
-    if not minimap_reference.is_file():
+    if minimap_reference.exists() and not minimap_reference.is_file():
         raise ValueError(f"Classification minimap2 reference must be a file: {minimap_reference}")
-    if minimap_index is not None and not minimap_index.is_file():
+    if minimap_index is not None and minimap_index.exists() and not minimap_index.is_file():
         raise ValueError(f"Classification minimap2 index must be a file: {minimap_index}")
     if not scratch_root.is_dir():
         raise ValueError(f"Scratch root must be a directory: {scratch_root}")
@@ -207,6 +218,12 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         runtime_minimap2_minutes=_positive_int(resources, "minimap2_runtime_minutes"),
         runtime_kmersutra_minutes=_positive_int(resources, "kmersutra_runtime_minutes"),
         kraken_confidence=_bounded_float(kraken2, "confidence", minimum=0.0, maximum=1.0),
+        kraken_failure_policy=_choice_default(
+            kraken2,
+            "failure_policy",
+            choices={"continue", "fail"},
+            default="continue",
+        ),
         metabuli_min_score=_bounded_float(
             metabuli,
             "min_score",
@@ -214,8 +231,20 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
             maximum=1.0,
         ),
         metabuli_max_ram_gb=_positive_int(metabuli, "max_ram_gb"),
+        metabuli_failure_policy=_choice_default(
+            metabuli,
+            "failure_policy",
+            choices={"continue", "fail"},
+            default="continue",
+        ),
         minimap_min_mapq=_non_negative_int(minimap2, "min_mapq"),
         minimap_min_alignment=_positive_int(minimap2, "min_alignment"),
+        minimap_failure_policy=_choice_default(
+            minimap2,
+            "failure_policy",
+            choices={"continue", "fail"},
+            default="continue",
+        ),
         kmersutra_screen_preset=_choice(
             kmersutra,
             "screen_preset",
@@ -240,6 +269,17 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
             choices={"continue", "fail"},
         ),
         kmersutra_timeout_minutes=_positive_int(kmersutra, "timeout_minutes"),
+        report_focus_taxa=_string_tuple_default(
+            reporting,
+            "focus_taxa",
+            default=("Plasmodium",),
+        ),
+        report_top_n=_positive_int_default(reporting, "top_n", default=20),
+        report_max_table_rows=_positive_int_default(
+            reporting,
+            "max_table_rows",
+            default=5000,
+        ),
         checksum_inputs=_boolean(provenance, "checksum_inputs"),
         samples=samples,
     )
@@ -356,6 +396,25 @@ def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+def _optional_mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    """Return an optional configuration mapping.
+
+    Args:
+        parent: Parent configuration mapping.
+        key: Section name.
+
+    Returns:
+        The configured mapping or an empty mapping when omitted.
+
+    Raises:
+        ValueError: If the optional section exists but is not a mapping.
+    """
+    value = parent.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"Configuration section {key!r} must be a mapping")
+    return value
+
+
 def _identifier(mapping: Mapping[str, Any], key: str) -> str:
     value = str(mapping.get(key, "")).strip()
     if not SAMPLE_ID_PATTERN.fullmatch(value):
@@ -420,6 +479,18 @@ def _positive_int(mapping: Mapping[str, Any], key: str) -> int:
     return value
 
 
+def _positive_int_default(
+    mapping: Mapping[str, Any],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    """Return an optional positive integer with a validated default."""
+    if key not in mapping:
+        return default
+    return _positive_int(mapping, key)
+
+
 def _non_negative_int(mapping: Mapping[str, Any], key: str) -> int:
     """Return a validated integer greater than or equal to zero."""
     value = mapping.get(key)
@@ -449,3 +520,43 @@ def _choice(mapping: Mapping[str, Any], key: str, *, choices: set[str]) -> str:
     if value not in choices:
         raise ValueError(f"{key} must be one of: {', '.join(sorted(choices))}")
     return value
+
+
+def _choice_default(
+    mapping: Mapping[str, Any],
+    key: str,
+    *,
+    choices: set[str],
+    default: str,
+) -> str:
+    """Return an optional constrained string with a validated default."""
+    if key not in mapping:
+        return default
+    return _choice(mapping, key, choices=choices)
+
+
+def _string_tuple_default(
+    mapping: Mapping[str, Any],
+    key: str,
+    *,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return a non-empty, de-duplicated tuple of report focus terms."""
+    if key not in mapping:
+        return default
+    value = mapping.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a YAML list of non-empty strings")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            raise ValueError(f"{key} must not contain blank values")
+        folded = text.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            cleaned.append(text)
+    if not cleaned:
+        raise ValueError(f"{key} must contain at least one value")
+    return tuple(cleaned)

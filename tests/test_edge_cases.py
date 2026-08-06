@@ -178,6 +178,22 @@ class TestCliRouting(unittest.TestCase):
         self.assertIn("--set-resources", kwargs["extra_arguments"])
         self.assertTrue(kwargs["unlock"])
 
+    def test_report_action_uses_the_configured_final_directory(self) -> None:
+        """Salvage reporting should need only a validated workflow config."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root)
+            with patch("nanopore_realdata.cli.aggregate_results") as aggregate:
+                self.assertEqual(
+                    main(["--action", "report", "--config", str(config_path)]),
+                    0,
+                )
+            completion = aggregate.call_args.kwargs["completion_path"]
+        self.assertEqual(
+            completion,
+            root / "results" / "03_final" / "workflow.complete.json",
+        )
+
 
 class TestConfigurationEdges(unittest.TestCase):
     """Cover validation branches that protect real input data."""

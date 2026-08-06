@@ -121,10 +121,13 @@ class TestPreflightAndAggregation(unittest.TestCase):
             ) as handle:
                 calls = handle.read()
             completion_status = json.loads(completion.read_text(encoding="utf-8"))["status"]
+            classifier_status = (
+                workflow.output_directory / "03_final" / "classifier_status.tsv"
+            ).read_text(encoding="utf-8")
         self.assertIn("failed", sample_summary)
-        self.assertIn("workflow_status", calls)
-        self.assertIn("failed", calls)
-        self.assertEqual(completion_status, "success")
+        self.assertEqual(calls, "sample_id\tmethod\tspecies_name\tdetection_call\n")
+        self.assertIn("kmersutra\tfailed", classifier_status)
+        self.assertEqual(completion_status, "partial")
 
 
 class TestKmerSutraFailurePolicy(unittest.TestCase):
@@ -176,7 +179,7 @@ class TestKmerSutraFailurePolicy(unittest.TestCase):
             payload = json.loads(stage.read_text(encoding="utf-8"))
             failure = stage.parent / "sample_1" / "failure.json"
             failure_exists = failure.is_file()
-        self.assertEqual(payload["status"], "partial")
+            self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["failed_samples"], ["sample_1"])
         self.assertTrue(failure_exists)
 
@@ -204,6 +207,61 @@ class TestKmerSutraFailurePolicy(unittest.TestCase):
                         method="kmersutra",
                         stage_completion=root / "stage.json",
                     )
+
+
+class TestIndependentClassifierFailurePolicies(unittest.TestCase):
+    """Ensure every classifier can terminate without blocking final reporting."""
+
+    def test_every_classifier_records_failure_under_continue_policy(self) -> None:
+        """Kraken2, Metabuli, minimap2 and KmerSutra share the status contract."""
+        for method in ("kraken2", "metabuli", "minimap2", "kmersutra"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config_path = build_test_project(root=root, input_read_state="host_removed")
+                workflow = load_workflow_config(config_path=config_path)
+                prepared = (
+                    workflow.output_directory
+                    / "01_host_depletion"
+                    / "sample_1"
+                    / "non_host.fastq.gz"
+                )
+                prepared.parent.mkdir(parents=True)
+                with gzip.open(prepared, "wt", encoding="utf-8") as handle:
+                    handle.write("@read\nACGT\n+\nIIII\n")
+                stage = (
+                    workflow.output_directory / "02_classification" / method / "stage.complete.json"
+                )
+                with (
+                    patch("nanopore_realdata.workflow._require_tools"),
+                    patch("nanopore_realdata.workflow._validate_classifier_resource"),
+                    patch("nanopore_realdata.workflow.validate_scratch"),
+                    patch(
+                        "nanopore_realdata.workflow.stage_resource",
+                        side_effect=lambda **kwargs: kwargs["source"],
+                    ),
+                    patch(
+                        "nanopore_realdata.workflow._classify_sample",
+                        side_effect=RuntimeError(f"{method} synthetic failure"),
+                    ),
+                ):
+                    classify_batch(
+                        config_path=config_path,
+                        method=method,
+                        stage_completion=stage,
+                        sample_id="sample_1" if method == "kmersutra" else None,
+                    )
+                stage_payload = json.loads(stage.read_text(encoding="utf-8"))
+                failure = (
+                    workflow.output_directory
+                    / "02_classification"
+                    / method
+                    / "sample_1"
+                    / "failure.json"
+                )
+                failure_payload = json.loads(failure.read_text(encoding="utf-8"))
+                self.assertEqual(stage_payload["status"], "failed")
+                self.assertEqual(failure_payload["status"], "failed")
+                self.assertEqual(failure_payload["method"], method)
 
 
 class TestCliAndSnakemake(unittest.TestCase):
@@ -274,6 +332,12 @@ class TestCliAndSnakemake(unittest.TestCase):
             snakefile = (
                 Path(__file__).resolve().parents[1] / "src" / "nanopore_realdata" / "Snakefile"
             )
+            snakefile_text = snakefile.read_text(encoding="utf-8")
+            minimap_rule = snakefile_text.split("if WORKFLOW.minimap_index is None:", maxsplit=1)[
+                1
+            ].split("MINIMAP_READY", maxsplit=1)[0]
+            self.assertIn("output_index=Path(MINIMAP_INDEX)", minimap_rule)
+            self.assertNotIn("output_index=Path(output.index)", minimap_rule)
             command = [
                 str(snakemake),
                 "--snakefile",

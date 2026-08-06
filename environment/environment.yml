@@ -13,5 +13,9 @@ dependencies:
   - rsync
   - pyyaml
   - snakemake-minimal>=9,<10
+  - coverage>=7.6
+  - pytest>=8
+  - python-build>=1.2
+  - ruff>=0.12
   - pip:
       - snakemake-executor-plugin-slurm>=1.9,<2

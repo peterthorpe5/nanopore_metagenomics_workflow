@@ -40,6 +40,8 @@ python -m coverage run -m unittest discover -s tests -p 'test_*.py' \
 python -m coverage report 2>&1 | tee "${RUN_DIR}/coverage.txt"
 python -m coverage html -d "${RUN_DIR}/coverage_html"
 python -m compileall -q src tests
+python -m build --outdir "${RUN_DIR}/dist" . \
+    2>&1 | tee "${RUN_DIR}/package_build.log"
 while IFS= read -r script_path; do
     bash -n "${script_path}"
 done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print | sort)

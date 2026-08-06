@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from nanopore_realdata.runtime import (
+    CommandTimeoutError,
     completion_is_valid,
     metadata_fingerprint,
     publish_directory,
@@ -143,10 +144,23 @@ class TestRuntime(unittest.TestCase):
     def test_run_command_timeout_is_a_controlled_failure(self) -> None:
         """A timed-out KmerSutra process should become a normal runtime error."""
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(RuntimeError, "time limit"):
+            with self.assertRaisesRegex(CommandTimeoutError, "time limit"):
                 run_command(
                     command=[sys.executable, "-c", "import time; time.sleep(2)"],
                     log_path=Path(temporary) / "timeout.log",
+                    timeout_seconds=1,
+                )
+
+    def test_run_pipeline_timeout_terminates_the_pipeline(self) -> None:
+        """minimap2-style pipelines should stop before scheduler termination."""
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(CommandTimeoutError, "time limit"):
+                run_pipeline(
+                    commands=[
+                        [sys.executable, "-c", "import time; time.sleep(2); print('late')"],
+                        ["cat"],
+                    ],
+                    log_path=Path(temporary) / "pipeline_timeout.log",
                     timeout_seconds=1,
                 )
 

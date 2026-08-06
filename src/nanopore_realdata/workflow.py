@@ -29,7 +29,14 @@ from nanopore_realdata.commands import (
 )
 from nanopore_realdata.config import Sample, WorkflowConfig, load_workflow_config
 from nanopore_realdata.minimap import summarise_minimap_paf
+from nanopore_realdata.reporting import (
+    METHODS,
+    build_normalised_evidence,
+    generate_html_reports,
+    serialisable_report_data,
+)
 from nanopore_realdata.runtime import (
+    CommandTimeoutError,
     capture_output,
     completion_is_valid,
     metadata_fingerprint,
@@ -58,20 +65,19 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         output_path: Declared preflight JSON output.
     """
     workflow = load_workflow_config(config_path=config_path)
-    actions = ["classify-kraken2", "classify-metabuli", "classify-minimap2"]
+    # Host preparation is a core dependency: without classification-ready
+    # reads no classifier can run. Classifier readiness is assessed separately
+    # and recorded rather than raised, allowing healthy branches to continue.
+    actions: list[str] = []
     if workflow.input_read_state == "raw":
         actions.extend(("build-host-index", "host-deplete"))
     else:
         actions.append("accept-host-removed")
-    if workflow.kmersutra_enabled:
-        actions.append("classify-kmersutra")
     for action in actions:
         _require_tools(action=action)
-    _validate_kraken_database(database=workflow.kraken_database)
-    _validate_non_empty_directory(label="Metabuli database", path=workflow.metabuli_database)
-    if workflow.kmersutra_enabled:
-        panel = _required_kmersutra_panel(workflow=workflow)
-        _validate_panel(panel=panel)
+    classifier_readiness = [
+        _classifier_readiness(workflow=workflow, method=method) for method in METHODS
+    ]
     sample_rows = []
     for sample in workflow.samples:
         for part_number, fastq_path in enumerate(sample.fastq_paths, start=1):
@@ -118,6 +124,11 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         rows=[{"software": name, "version": value} for name, value in tools.items()],
         fieldnames=("software", "version"),
     )
+    _write_tsv(
+        path=output_path.parent / "classifier_readiness.tsv",
+        rows=classifier_readiness,
+        fieldnames=("method", "status", "message", "resource"),
+    )
     payload = {
         "status": "success",
         "checked_at_utc": utc_now(),
@@ -136,36 +147,37 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
                 if workflow.input_read_state == "raw"
                 else "not_applicable_already_host_removed"
             ),
-            "kraken2_database": metadata_fingerprint(
-                paths=[workflow.kraken_database],
-                checksum_files=False,
+            "kraken2_database": _safe_resource_fingerprint(
+                path=workflow.kraken_database,
+                checksum_file=False,
             ),
-            "metabuli_database": metadata_fingerprint(
-                paths=[workflow.metabuli_database],
-                checksum_files=False,
+            "metabuli_database": _safe_resource_fingerprint(
+                path=workflow.metabuli_database,
+                checksum_file=False,
             ),
-            "minimap2_reference": metadata_fingerprint(
-                paths=[workflow.minimap_reference],
-                checksum_files=True,
+            "minimap2_reference": _safe_resource_fingerprint(
+                path=workflow.minimap_reference,
+                checksum_file=True,
             ),
             "minimap2_index": (
-                metadata_fingerprint(
-                    paths=[workflow.minimap_index],
-                    checksum_files=True,
+                _safe_resource_fingerprint(
+                    path=workflow.minimap_index,
+                    checksum_file=True,
                 )
                 if workflow.minimap_index is not None
                 else "built_by_workflow_from_configured_reference"
             ),
             "kmersutra_panel": (
-                metadata_fingerprint(
-                    paths=[_required_kmersutra_panel(workflow=workflow)],
-                    checksum_files=True,
+                _safe_resource_fingerprint(
+                    path=_required_kmersutra_panel(workflow=workflow),
+                    checksum_file=True,
                 )
                 if workflow.kmersutra_enabled
                 else "disabled"
             ),
         },
         "software": tools,
+        "classifier_readiness": classifier_readiness,
     }
     write_json_atomic(path=output_path, payload=payload)
 
@@ -228,56 +240,86 @@ def build_minimap_index(
     output_index: Path,
     output_completion: Path,
 ) -> None:
-    """Build a checksum-bound classification index from the configured FASTA."""
+    """Build a checksum-bound classification index without blocking other tools.
+
+    A failed index build writes a terminal minimap2 readiness record when that
+    classifier uses ``failure_policy: continue``. The downstream minimap2 rule
+    will record matching per-sample failures, while aggregation remains able to
+    report Kraken2, Metabuli and KmerSutra results.
+    """
     workflow = load_workflow_config(config_path=config_path)
-    signature = task_signature(
-        task={"action": "build-minimap2-index", "run_id": workflow.run_id},
-        inputs=[workflow.minimap_reference, workflow.config_path],
-        checksum_files=True,
-    )
-    if completion_is_valid(
-        completion_path=output_completion,
-        signature=signature,
-        outputs=[output_index],
-    ):
-        LOGGER.info("Classification minimap2 index is already complete: %s", output_index)
-        return
-    _require_tools(action="build-host-index")
-    validate_scratch(
-        scratch_root=workflow.scratch_root,
-        minimum_gb=workflow.minimum_scratch_gb,
-    )
     stage_log = output_index.parent / "minimap2_index.log"
-    with scratch_workspace(
-        scratch_root=workflow.scratch_root,
-        label="classification_minimap_index",
-    ) as workspace:
-        local_reference = workflow.minimap_reference
-        if workflow.stage_resources:
-            local_reference = stage_resource(
-                source=workflow.minimap_reference,
-                destination_root=workspace / "reference",
-                log_path=stage_log,
+    try:
+        if not workflow.minimap_reference.is_file():
+            raise FileNotFoundError(
+                f"Classification minimap2 reference is missing: {workflow.minimap_reference}"
             )
-        local_index = workspace / "classification_reference.mmi"
-        run_command(
-            command=minimap2_index_command(
-                reference=local_reference,
-                output_index=local_index,
-            ),
-            log_path=stage_log,
+        signature = task_signature(
+            task={"action": "build-minimap2-index", "run_id": workflow.run_id},
+            inputs=[workflow.minimap_reference, workflow.config_path],
+            checksum_files=True,
         )
-        _publish_file(source=local_index, destination=output_index, log_path=stage_log)
-    write_completion(
-        completion_path=output_completion,
-        signature=signature,
-        outputs=[output_index],
-        extra={
-            "action": "build-minimap2-index",
-            "reference": str(workflow.minimap_reference),
-            "reference_sha256": sha256_file(path=workflow.minimap_reference),
-        },
-    )
+        if completion_is_valid(
+            completion_path=output_completion,
+            signature=signature,
+            outputs=[output_index],
+        ):
+            LOGGER.info("Classification minimap2 index is already complete: %s", output_index)
+            return
+        _require_tools(action="build-host-index")
+        validate_scratch(
+            scratch_root=workflow.scratch_root,
+            minimum_gb=workflow.minimum_scratch_gb,
+        )
+        with scratch_workspace(
+            scratch_root=workflow.scratch_root,
+            label="classification_minimap_index",
+        ) as workspace:
+            local_reference = workflow.minimap_reference
+            if workflow.stage_resources:
+                local_reference = stage_resource(
+                    source=workflow.minimap_reference,
+                    destination_root=workspace / "reference",
+                    log_path=stage_log,
+                )
+            local_index = workspace / "classification_reference.mmi"
+            run_command(
+                command=minimap2_index_command(
+                    reference=local_reference,
+                    output_index=local_index,
+                ),
+                log_path=stage_log,
+                timeout_seconds=_internal_timeout_seconds(
+                    runtime_minutes=workflow.runtime_minimap2_minutes
+                ),
+            )
+            _publish_file(source=local_index, destination=output_index, log_path=stage_log)
+        write_completion(
+            completion_path=output_completion,
+            signature=signature,
+            outputs=[output_index],
+            extra={
+                "action": "build-minimap2-index",
+                "reference": str(workflow.minimap_reference),
+                "reference_sha256": sha256_file(path=workflow.minimap_reference),
+                "allocated_memory_mb": workflow.memory_minimap2_mb,
+            },
+        )
+    except Exception as error:
+        if workflow.minimap_failure_policy == "fail":
+            raise
+        output_index.unlink(missing_ok=True)
+        LOGGER.exception("minimap2 index preparation failed; continuing with partial reporting")
+        _write_stage_failure(
+            path=output_completion,
+            stage="minimap2_index",
+            error=error,
+            status=_failure_status(error=error),
+            extra={
+                "reference": str(workflow.minimap_reference),
+                "allocated_memory_mb": workflow.memory_minimap2_mb,
+            },
+        )
 
 
 def host_deplete_batch(
@@ -399,11 +441,14 @@ def classify_batch(
     stage_completion: Path,
     sample_id: str | None = None,
 ) -> None:
-    """Classify selected non-host samples after staging one method resource.
+    """Classify selected samples and always publish a terminal stage record.
 
     KmerSutra is normally invoked with one sample per Snakemake job so its
-    timeout and failure state are isolated. Kraken2 and Metabuli deliberately
-    remain bundled to stage each large database only once.
+    timeout and failure state are isolated. Kraken2, Metabuli and minimap2 are
+    bundled to stage each large resource only once, but a per-sample failure
+    does not discard successful samples from the same batch. With the default
+    ``continue`` policy, tool, resource, timeout and output-validation failures
+    become explicit status records rather than failed reporting dependencies.
     """
     if method not in {"kraken2", "metabuli", "minimap2", "kmersutra"}:
         raise ValueError(f"Unsupported classifier method: {method}")
@@ -415,6 +460,7 @@ def classify_batch(
         )
         if not selected_samples:
             raise ValueError(f"Unknown sample_id for classification: {sample_id}")
+    failure_policy = _method_failure_policy(workflow=workflow, method=method)
     if method == "kmersutra" and not workflow.kmersutra_enabled:
         write_json_atomic(
             path=stage_completion,
@@ -427,168 +473,207 @@ def classify_batch(
             },
         )
         return
-    _require_tools(action=f"classify-{method}")
-    validate_scratch(
-        scratch_root=workflow.scratch_root,
-        minimum_gb=workflow.minimum_scratch_gb,
-    )
-    reference_fasta: Path | None = None
-    if method == "kraken2":
-        resource = workflow.kraken_database
-    elif method == "metabuli":
-        resource = workflow.metabuli_database
-    elif method == "minimap2":
-        resource = _resolved_minimap_index(workflow=workflow)
-        reference_fasta = workflow.minimap_reference
-    else:
-        resource = _required_kmersutra_panel(workflow=workflow)
     stage_root = stage_completion.parent
     stage_root.mkdir(parents=True, exist_ok=True)
     stage_log = stage_root / "resource_staging.log"
-    with scratch_workspace(scratch_root=workflow.scratch_root, label=method) as workspace:
-        local_resource = resource
-        if workflow.stage_resources:
-            local_resource = stage_resource(
-                source=resource,
-                destination_root=workspace / "resource",
-                log_path=stage_log,
-            )
-        local_reference = reference_fasta
-        if workflow.stage_resources and reference_fasta is not None:
-            local_reference = stage_resource(
-                source=reference_fasta,
-                destination_root=workspace / "reference_fasta",
-                log_path=stage_log,
-            )
-        for sample in selected_samples:
-            try:
-                _classify_sample(
-                    workflow=workflow,
-                    sample=sample,
-                    method=method,
-                    resource=local_resource,
-                    signature_resources=tuple(
-                        path for path in (resource, reference_fasta) if path is not None
-                    ),
-                    reference_fasta=local_reference,
-                    workspace=workspace,
+    successes: list[str] = []
+    failures: list[dict[str, str]] = []
+    try:
+        _require_tools(action=f"classify-{method}")
+        resource, reference_fasta = _classifier_resources(workflow=workflow, method=method)
+        _validate_classifier_resource(
+            workflow=workflow,
+            method=method,
+            resource=resource,
+            reference_fasta=reference_fasta,
+        )
+        validate_scratch(
+            scratch_root=workflow.scratch_root,
+            minimum_gb=workflow.minimum_scratch_gb,
+        )
+        with scratch_workspace(scratch_root=workflow.scratch_root, label=method) as workspace:
+            local_resource = resource
+            if workflow.stage_resources:
+                local_resource = stage_resource(
+                    source=resource,
+                    destination_root=workspace / "resource",
+                    log_path=stage_log,
                 )
-            except Exception as error:
-                if method != "kmersutra" or workflow.kmersutra_failure_policy == "fail":
-                    raise
-                LOGGER.exception(
-                    "KmerSutra failed for %s; continuing as configured",
-                    sample.sample_id,
+            local_reference = reference_fasta
+            if workflow.stage_resources and reference_fasta is not None:
+                local_reference = stage_resource(
+                    source=reference_fasta,
+                    destination_root=workspace / "reference_fasta",
+                    log_path=stage_log,
                 )
-                failure_path = (
-                    _method_result_directory(
+            for sample in selected_samples:
+                try:
+                    _classify_sample(
                         workflow=workflow,
                         sample=sample,
                         method=method,
+                        resource=local_resource,
+                        signature_resources=tuple(
+                            path for path in (resource, reference_fasta) if path is not None
+                        ),
+                        reference_fasta=local_reference,
+                        workspace=workspace,
                     )
-                    / "failure.json"
-                )
-                write_json_atomic(
-                    path=failure_path,
-                    payload={
-                        "status": "failed",
-                        "sample_id": sample.sample_id,
-                        "method": method,
-                        "error": str(error),
-                        "failed_at_utc": utc_now(),
-                    },
-                )
-    failures = [
-        sample.sample_id
-        for sample in selected_samples
-        if (
-            _method_result_directory(
+                    successes.append(sample.sample_id)
+                except Exception as error:
+                    if failure_policy == "fail":
+                        raise
+                    LOGGER.exception(
+                        "%s failed for %s; continuing as configured",
+                        method,
+                        sample.sample_id,
+                    )
+                    status = _failure_status(error=error)
+                    _write_method_failure(
+                        workflow=workflow,
+                        sample=sample,
+                        method=method,
+                        error=error,
+                        status=status,
+                    )
+                    failures.append(
+                        {
+                            "sample_id": sample.sample_id,
+                            "status": status,
+                            "message": str(error),
+                        }
+                    )
+    except Exception as error:
+        if failure_policy == "fail":
+            raise
+        LOGGER.exception("%s stage failed; continuing to partial reporting", method)
+        status = _failure_status(error=error)
+        already_terminal = set(successes) | {row["sample_id"] for row in failures}
+        for sample in selected_samples:
+            if sample.sample_id in already_terminal:
+                continue
+            _write_method_failure(
                 workflow=workflow,
                 sample=sample,
                 method=method,
+                error=error,
+                status=status,
             )
-            / "failure.json"
-        ).is_file()
-    ]
+            failures.append(
+                {
+                    "sample_id": sample.sample_id,
+                    "status": status,
+                    "message": str(error),
+                }
+            )
+
+    stage_status = _batch_status(successes=successes, failures=failures)
     write_json_atomic(
         path=stage_completion,
         payload={
-            "status": "partial" if failures else "success",
+            "status": stage_status,
             "completed_at_utc": utc_now(),
             "stage": method,
             "sample_count": len(selected_samples),
-            "failed_samples": failures,
+            "successful_samples": successes,
+            "failed_samples": [row["sample_id"] for row in failures],
+            "sample_failures": failures,
+            "failure_policy": failure_policy,
+            "allocated_memory_mb": _method_memory_mb(workflow=workflow, method=method),
+            "allocated_runtime_minutes": _method_runtime_minutes(
+                workflow=workflow,
+                method=method,
+            ),
         },
     )
 
 
 def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
-    """Create harmonised TSV summaries and a checksummed result inventory."""
+    """Create tabular and HTML reports from every validated available result.
+
+    Classifier outputs are discovered only after their per-sample terminal
+    status is read. Missing or malformed method outputs become non-fatal report
+    warnings. Consequently, final reporting is still produced when any subset
+    of classifiers succeeds.
+    """
     workflow = load_workflow_config(config_path=config_path)
     final_root = completion_path.parent
     final_root.mkdir(parents=True, exist_ok=True)
     sample_rows: list[dict[str, Any]] = []
+    status_rows: list[dict[str, str]] = []
     taxon_rows: list[dict[str, Any]] = []
     minimap_rows: list[dict[str, Any]] = []
     kmersutra_rows: list[dict[str, Any]] = []
+    warning_rows: list[dict[str, str]] = []
     for sample in workflow.samples:
         host_summary = _read_single_tsv(
             path=_host_result_directory(workflow=workflow, sample=sample)
             / "host_removal_summary.tsv"
         )
+        sample_statuses: dict[str, str] = {}
+        for method in METHODS:
+            record = _method_status_record(
+                workflow=workflow,
+                sample=sample,
+                method=method,
+            )
+            status_rows.append(record)
+            sample_statuses[method] = record["status"]
         sample_rows.append(
             {
                 **host_summary,
                 "input_read_state": workflow.input_read_state,
                 "host_depletion_performed": str(workflow.input_read_state == "raw").lower(),
-                "kraken2_status": _method_status(
-                    workflow=workflow,
-                    sample=sample,
-                    method="kraken2",
-                ),
-                "metabuli_status": _method_status(
-                    workflow=workflow,
-                    sample=sample,
-                    method="metabuli",
-                ),
-                "minimap2_status": _method_status(
-                    workflow=workflow,
-                    sample=sample,
-                    method="minimap2",
-                ),
-                "kmersutra_status": _method_status(
-                    workflow=workflow,
-                    sample=sample,
-                    method="kmersutra",
-                ),
+                **{f"{method}_status": sample_statuses[method] for method in METHODS},
             }
         )
         for method in ("kraken2", "metabuli"):
+            if sample_statuses[method] != "success":
+                continue
             report = (
                 _method_result_directory(workflow=workflow, sample=sample, method=method)
                 / "report.tsv"
             )
-            taxon_rows.extend(
-                _parse_classifier_report(
-                    path=report,
-                    sample_id=sample.sample_id,
-                    method=method,
+            try:
+                taxon_rows.extend(
+                    _parse_classifier_report(
+                        path=report,
+                        sample_id=sample.sample_id,
+                        method=method,
+                    )
                 )
-            )
-        minimap_rows.extend(
-            _read_rows_with_method(
-                path=(
-                    _method_result_directory(
-                        workflow=workflow,
-                        sample=sample,
+            except (OSError, ValueError) as error:
+                warning_rows.append(
+                    _report_warning(
+                        sample_id=sample.sample_id,
+                        source=method,
+                        message=f"Validated completion had an unreadable report: {error}",
+                    )
+                )
+        if sample_statuses["minimap2"] == "success":
+            try:
+                minimap_rows.extend(
+                    _read_rows_with_method(
+                        path=(
+                            _method_result_directory(
+                                workflow=workflow,
+                                sample=sample,
+                                method="minimap2",
+                            )
+                            / "taxon_report.tsv"
+                        ),
+                        sample_id=sample.sample_id,
                         method="minimap2",
                     )
-                    / "taxon_report.tsv"
-                ),
-                sample_id=sample.sample_id,
-                method="minimap2",
-            )
-        )
+                )
+            except (OSError, ValueError) as error:
+                warning_rows.append(
+                    _report_warning(
+                        sample_id=sample.sample_id,
+                        source="minimap2",
+                        message=f"Validated completion had an unreadable report: {error}",
+                    )
+                )
         calls = (
             _method_result_directory(
                 workflow=workflow,
@@ -597,25 +682,28 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             )
             / "species_detection_calls.tsv"
         )
-        if calls.is_file():
-            kmersutra_rows.extend(_read_rows_with_prefix(path=calls, sample_id=sample.sample_id))
-        else:
-            kmersutra_rows.append(
-                {
-                    "sample_id": sample.sample_id,
-                    "method": "kmersutra",
-                    "workflow_status": _method_status(
-                        workflow=workflow,
-                        sample=sample,
-                        method="kmersutra",
-                    ),
-                }
-            )
+        if sample_statuses["kmersutra"] == "success":
+            try:
+                kmersutra_rows.extend(
+                    _read_rows_with_prefix(path=calls, sample_id=sample.sample_id)
+                )
+            except (OSError, ValueError) as error:
+                warning_rows.append(
+                    _report_warning(
+                        sample_id=sample.sample_id,
+                        source="kmersutra",
+                        message=f"Validated completion had unreadable calls: {error}",
+                    )
+                )
 
     summary_path = final_root / "sample_summary.tsv"
+    status_path = final_root / "classifier_status.tsv"
     taxon_path = final_root / "classifier_taxon_reports.tsv.gz"
     calls_path = final_root / "kmersutra_species_calls.tsv.gz"
     minimap_path = final_root / "minimap2_taxon_reports.tsv.gz"
+    evidence_path = final_root / "normalised_classifier_evidence.tsv.gz"
+    warning_path = final_root / "report_warnings.tsv"
+    report_data_path = final_root / "report_data.json"
     _write_tsv(
         path=summary_path,
         rows=sample_rows,
@@ -634,6 +722,19 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         ),
     )
     _write_tsv(
+        path=status_path,
+        rows=status_rows,
+        fieldnames=(
+            "sample_id",
+            "method",
+            "status",
+            "message",
+            "completed_at_utc",
+            "allocated_memory_mb",
+            "allocated_runtime_minutes",
+        ),
+    )
+    _write_tsv(
         path=taxon_path,
         rows=taxon_rows,
         fieldnames=(
@@ -647,7 +748,12 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "taxon_name",
         ),
     )
-    calls_fields = tuple(dict.fromkeys(key for row in kmersutra_rows for key in row))
+    calls_fields = tuple(dict.fromkeys(key for row in kmersutra_rows for key in row)) or (
+        "sample_id",
+        "method",
+        "species_name",
+        "detection_call",
+    )
     _write_tsv(path=calls_path, rows=kmersutra_rows, fieldnames=calls_fields)
     minimap_fields = tuple(dict.fromkeys(key for row in minimap_rows for key in row)) or (
         "sample_id",
@@ -662,46 +768,147 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         "min_alignment",
     )
     _write_tsv(path=minimap_path, rows=minimap_rows, fieldnames=minimap_fields)
+    evidence_rows = build_normalised_evidence(
+        classifier_rows=taxon_rows,
+        minimap_rows=minimap_rows,
+        kmersutra_rows=kmersutra_rows,
+        focus_taxa=workflow.report_focus_taxa,
+    )
+    _write_tsv(
+        path=evidence_path,
+        rows=evidence_rows,
+        fieldnames=(
+            "sample_id",
+            "method",
+            "taxon_name",
+            "tax_id",
+            "rank",
+            "evidence_count",
+            "supporting_count",
+            "fraction",
+            "metric",
+            "detected",
+            "comparable",
+            "is_focus",
+        ),
+    )
+    _write_tsv(
+        path=warning_path,
+        rows=warning_rows,
+        fieldnames=("sample_id", "source", "message"),
+    )
+    write_json_atomic(
+        path=report_data_path,
+        payload=serialisable_report_data(
+            sample_rows=sample_rows,
+            status_rows=status_rows,
+            evidence_rows=evidence_rows,
+            warning_rows=warning_rows,
+        ),
+    )
+    html_paths = generate_html_reports(
+        workflow=workflow,
+        sample_rows=sample_rows,
+        status_rows=status_rows,
+        evidence_rows=evidence_rows,
+        warning_rows=warning_rows,
+        final_root=final_root,
+    )
+    report_manifest_path = final_root / "report_manifest.json"
     readme_path = final_root / "README.txt"
     readme_path.write_text(
         "Nanopore real-data workflow final results\n\n"
-        "sample_summary.tsv contains host-removal totals and stage status.\n"
+        "Open reports/index.html for the offline final report.\n"
+        "reports/classifiers/ contains one detailed HTML report per classifier.\n"
+        "reports/comparison.html compares available method-specific evidence.\n"
+        "reports/samples/ contains one navigable report per sample.\n"
+        "sample_summary.tsv contains host-removal totals and classifier status.\n"
+        "classifier_status.tsv records every successful, failed, timed-out, disabled, "
+        "unavailable or missing sample-method result.\n"
         "classifier_taxon_reports.tsv.gz harmonises Kraken2 and Metabuli reports.\n"
         "minimap2_taxon_reports.tsv.gz summarises controlled-reference best alignments.\n"
         "kmersutra_species_calls.tsv.gz combines KmerSutra species calls.\n"
+        "normalised_classifier_evidence.tsv.gz supports descriptive comparison without "
+        "forcing consensus.\n"
+        "report_data.json is a reusable machine-readable reporting payload.\n"
+        "report_warnings.tsv records non-fatal parsing or completeness problems.\n"
         "SHA256SUMS.tsv records final-file checksums.\n",
         encoding="utf-8",
     )
     checksum_path = final_root / "SHA256SUMS.tsv"
+    checksum_targets = [
+        summary_path,
+        status_path,
+        taxon_path,
+        minimap_path,
+        calls_path,
+        evidence_path,
+        warning_path,
+        report_data_path,
+        report_manifest_path,
+        readme_path,
+        *html_paths,
+    ]
     checksum_rows = [
-        {"sha256": sha256_file(path=path), "file": path.name}
-        for path in (summary_path, taxon_path, minimap_path, calls_path, readme_path)
+        {
+            "sha256": sha256_file(path=path),
+            "file": str(path.relative_to(final_root)),
+        }
+        for path in checksum_targets
     ]
     _write_tsv(
         path=checksum_path,
         rows=checksum_rows,
         fieldnames=("sha256", "file"),
     )
+    enabled_statuses = [
+        row["status"]
+        for row in status_rows
+        if not (row["method"] == "kmersutra" and not workflow.kmersutra_enabled)
+    ]
+    successful = sum(status == "success" for status in enabled_statuses)
+    if successful == len(enabled_statuses):
+        final_status = "success"
+    elif successful:
+        final_status = "partial"
+    else:
+        final_status = "failed"
     write_json_atomic(
         path=completion_path,
         payload={
-            "status": "success",
+            "status": final_status,
+            "reporting_status": "success",
             "completed_at_utc": utc_now(),
             "run_id": workflow.run_id,
             "sample_count": len(workflow.samples),
+            "successful_classifier_runs": successful,
+            "expected_classifier_runs": len(enabled_statuses),
+            "reports_generated": True,
+            "final_report": str(final_root / "reports" / "index.html"),
             "outputs": [
                 str(path)
                 for path in (
                     summary_path,
+                    status_path,
                     taxon_path,
                     minimap_path,
                     calls_path,
+                    evidence_path,
+                    warning_path,
+                    report_data_path,
+                    report_manifest_path,
                     readme_path,
                     checksum_path,
+                    *html_paths,
                 )
             ],
         },
     )
+
+
+def _report_warning(*, sample_id: str, source: str, message: str) -> dict[str, str]:
+    """Create a consistent non-fatal reporting warning row."""
+    return {"sample_id": sample_id, "source": source, "message": message}
 
 
 def run_snakemake(
@@ -1101,6 +1308,7 @@ def _run_kraken2(
             confidence=workflow.kraken_confidence,
         ),
         log_path=log_path,
+        timeout_seconds=_internal_timeout_seconds(runtime_minutes=workflow.runtime_kraken2_minutes),
     )
     _handle_per_read_output(
         raw_path=raw,
@@ -1132,6 +1340,9 @@ def _run_metabuli(
             minimum_score=workflow.metabuli_min_score,
         ),
         log_path=log_path,
+        timeout_seconds=_internal_timeout_seconds(
+            runtime_minutes=workflow.runtime_metabuli_minutes
+        ),
     )
     raw = output_directory / "metabuli_classifications.tsv"
     generated_report = output_directory / "metabuli_report.tsv"
@@ -1171,6 +1382,9 @@ def _run_minimap2(
         ],
         log_path=log_path,
         stdout_path=paf_path,
+        timeout_seconds=_internal_timeout_seconds(
+            runtime_minutes=workflow.runtime_minimap2_minutes
+        ),
     )
     summarise_minimap_paf(
         paf_path=paf_path,
@@ -1309,6 +1523,224 @@ def _method_task_settings(
     return common
 
 
+def _classifier_resources(
+    *,
+    workflow: WorkflowConfig,
+    method: str,
+) -> tuple[Path, Path | None]:
+    """Return the primary resource and optional reference for a classifier."""
+    if method == "kraken2":
+        return workflow.kraken_database, None
+    if method == "metabuli":
+        return workflow.metabuli_database, None
+    if method == "minimap2":
+        return _resolved_minimap_index(workflow=workflow), workflow.minimap_reference
+    if method == "kmersutra":
+        return _required_kmersutra_panel(workflow=workflow), None
+    raise ValueError(f"Unsupported classifier method: {method}")
+
+
+def _validate_classifier_resource(
+    *,
+    workflow: WorkflowConfig,
+    method: str,
+    resource: Path,
+    reference_fasta: Path | None,
+) -> None:
+    """Validate one classifier's resource without inspecting unrelated tools."""
+    del workflow
+    if method == "kraken2":
+        _validate_kraken_database(database=resource)
+    elif method == "metabuli":
+        _validate_non_empty_directory(label="Metabuli database", path=resource)
+    elif method == "minimap2":
+        if not resource.is_file() or resource.stat().st_size == 0:
+            raise FileNotFoundError(f"minimap2 index is missing or empty: {resource}")
+        if reference_fasta is None or not reference_fasta.is_file():
+            raise FileNotFoundError(
+                f"minimap2 classification reference is missing: {reference_fasta}"
+            )
+    elif method == "kmersutra":
+        _validate_panel(panel=resource)
+    else:
+        raise ValueError(f"Unsupported classifier method: {method}")
+
+
+def _classifier_readiness(*, workflow: WorkflowConfig, method: str) -> dict[str, str]:
+    """Return a non-raising preflight status for one independent classifier."""
+    if method == "kmersutra" and not workflow.kmersutra_enabled:
+        return {
+            "method": method,
+            "status": "disabled",
+            "message": "Disabled by configuration",
+            "resource": "",
+        }
+    try:
+        _require_tools(action=f"classify-{method}")
+        resource, reference = _classifier_resources(workflow=workflow, method=method)
+        if method == "minimap2" and workflow.minimap_index is None:
+            if not workflow.minimap_reference.is_file():
+                raise FileNotFoundError(
+                    f"minimap2 classification reference is missing: {workflow.minimap_reference}"
+                )
+            resource_text = "index will be built from configured reference"
+        else:
+            _validate_classifier_resource(
+                workflow=workflow,
+                method=method,
+                resource=resource,
+                reference_fasta=reference,
+            )
+            resource_text = str(resource)
+        return {
+            "method": method,
+            "status": "ready",
+            "message": "Executable and configured resource are available",
+            "resource": resource_text,
+        }
+    except Exception as error:
+        return {
+            "method": method,
+            "status": "unavailable",
+            "message": str(error),
+            "resource": str(_classifier_resource_hint(workflow=workflow, method=method)),
+        }
+
+
+def _classifier_resource_hint(*, workflow: WorkflowConfig, method: str) -> Path | str:
+    """Return a resource label without requiring the resource to be valid."""
+    if method == "kraken2":
+        return workflow.kraken_database
+    if method == "metabuli":
+        return workflow.metabuli_database
+    if method == "minimap2":
+        return workflow.minimap_index or workflow.minimap_reference
+    return workflow.kmersutra_panel or "not configured"
+
+
+def _method_failure_policy(*, workflow: WorkflowConfig, method: str) -> str:
+    policies = {
+        "kraken2": workflow.kraken_failure_policy,
+        "metabuli": workflow.metabuli_failure_policy,
+        "minimap2": workflow.minimap_failure_policy,
+        "kmersutra": workflow.kmersutra_failure_policy,
+    }
+    try:
+        return policies[method]
+    except KeyError as error:
+        raise ValueError(f"Unsupported classifier method: {method}") from error
+
+
+def _method_memory_mb(*, workflow: WorkflowConfig, method: str) -> int:
+    values = {
+        "kraken2": workflow.memory_kraken2_mb,
+        "metabuli": workflow.memory_metabuli_mb,
+        "minimap2": workflow.memory_minimap2_mb,
+        "kmersutra": workflow.memory_kmersutra_mb,
+    }
+    return values[method]
+
+
+def _method_runtime_minutes(*, workflow: WorkflowConfig, method: str) -> int:
+    values = {
+        "kraken2": workflow.runtime_kraken2_minutes,
+        "metabuli": workflow.runtime_metabuli_minutes,
+        "minimap2": workflow.runtime_minimap2_minutes,
+        "kmersutra": workflow.runtime_kmersutra_minutes,
+    }
+    return values[method]
+
+
+def _internal_timeout_seconds(*, runtime_minutes: int) -> int:
+    """Leave ten minutes for failure publication before scheduler termination."""
+    if runtime_minutes <= 0:
+        raise ValueError("Runtime minutes must be positive")
+    return max(60, (runtime_minutes - 10) * 60)
+
+
+def _failure_status(*, error: Exception) -> str:
+    """Classify a caught exception for machine-readable reporting."""
+    if isinstance(error, CommandTimeoutError) or "time limit" in str(error).casefold():
+        return "timeout"
+    if isinstance(error, (FileNotFoundError, PermissionError)):
+        return "unavailable"
+    return "failed"
+
+
+def _batch_status(
+    *,
+    successes: Sequence[str],
+    failures: Sequence[Mapping[str, str]],
+) -> str:
+    """Summarise a classifier batch without discarding failure specificity."""
+    if successes and failures:
+        return "partial"
+    if successes:
+        return "success"
+    statuses = {str(row.get("status", "failed")) for row in failures}
+    if len(statuses) == 1:
+        return next(iter(statuses))
+    return "failed"
+
+
+def _write_method_failure(
+    *,
+    workflow: WorkflowConfig,
+    sample: Sample,
+    method: str,
+    error: Exception,
+    status: str,
+) -> None:
+    """Write a compact per-sample failure record and invalidate stale success."""
+    result = _method_result_directory(workflow=workflow, sample=sample, method=method)
+    result.mkdir(parents=True, exist_ok=True)
+    (result / "complete.json").unlink(missing_ok=True)
+    write_json_atomic(
+        path=result / "failure.json",
+        payload={
+            "status": status,
+            "sample_id": sample.sample_id,
+            "method": method,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "failed_at_utc": utc_now(),
+            "allocated_memory_mb": _method_memory_mb(workflow=workflow, method=method),
+            "allocated_runtime_minutes": _method_runtime_minutes(
+                workflow=workflow,
+                method=method,
+            ),
+        },
+    )
+
+
+def _write_stage_failure(
+    *,
+    path: Path,
+    stage: str,
+    error: Exception,
+    status: str,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
+    """Write a terminal stage token after a recoverable infrastructure failure."""
+    payload: dict[str, Any] = {
+        "status": status,
+        "stage": stage,
+        "error": str(error),
+        "error_type": type(error).__name__,
+        "completed_at_utc": utc_now(),
+    }
+    if extra:
+        payload.update(extra)
+    write_json_atomic(path=path, payload=payload)
+
+
+def _safe_resource_fingerprint(*, path: Path, checksum_file: bool) -> str:
+    """Fingerprint an available resource or return an explicit missing label."""
+    if not path.exists():
+        return f"missing:{path}"
+    return metadata_fingerprint(paths=[path], checksum_files=checksum_file)
+
+
 def _host_result_directory(*, workflow: WorkflowConfig, sample: Sample) -> Path:
     return workflow.output_directory / "01_host_depletion" / sample.sample_id
 
@@ -1325,23 +1757,69 @@ def _method_result_directory(
 def _method_status(*, workflow: WorkflowConfig, sample: Sample, method: str) -> str:
     if method == "kmersutra" and not workflow.kmersutra_enabled:
         return "disabled"
-    path = (
-        _method_result_directory(
-            workflow=workflow,
-            sample=sample,
-            method=method,
-        )
-        / "complete.json"
+    result = _method_result_directory(
+        workflow=workflow,
+        sample=sample,
+        method=method,
     )
+    failure = result / "failure.json"
+    if failure.is_file():
+        try:
+            return str(json.loads(failure.read_text(encoding="utf-8")).get("status", "failed"))
+        except (json.JSONDecodeError, OSError):
+            return "invalid"
+    path = result / "complete.json"
     if not path.is_file():
-        failure = path.with_name("failure.json")
-        if failure.is_file():
-            return "failed"
         return "missing"
     try:
         return str(json.loads(path.read_text(encoding="utf-8")).get("status", "invalid"))
     except (json.JSONDecodeError, OSError):
         return "invalid"
+
+
+def _method_status_record(
+    *,
+    workflow: WorkflowConfig,
+    sample: Sample,
+    method: str,
+) -> dict[str, str]:
+    """Return a human- and machine-readable classifier terminal status."""
+    status = _method_status(workflow=workflow, sample=sample, method=method)
+    result = _method_result_directory(workflow=workflow, sample=sample, method=method)
+    metadata_path = result / ("complete.json" if status == "success" else "failure.json")
+    payload: dict[str, Any] = {}
+    if metadata_path.is_file():
+        try:
+            value = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                payload = value
+        except (json.JSONDecodeError, OSError):
+            payload = {}
+    message = ""
+    if status == "disabled":
+        message = "Disabled by configuration"
+    elif status == "success":
+        message = "Validated outputs available"
+    elif status == "missing":
+        message = "No terminal result record was found"
+    else:
+        message = str(payload.get("error", payload.get("reason", status)))
+    return {
+        "sample_id": sample.sample_id,
+        "method": method,
+        "status": status,
+        "message": message,
+        "completed_at_utc": str(payload.get("completed_at_utc", payload.get("failed_at_utc", ""))),
+        "allocated_memory_mb": str(
+            payload.get("allocated_memory_mb", _method_memory_mb(workflow=workflow, method=method))
+        ),
+        "allocated_runtime_minutes": str(
+            payload.get(
+                "allocated_runtime_minutes",
+                _method_runtime_minutes(workflow=workflow, method=method),
+            )
+        ),
+    }
 
 
 def _parse_classifier_report(

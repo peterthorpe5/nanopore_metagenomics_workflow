@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -17,6 +18,12 @@ from typing import Any, BinaryIO, Iterator, Mapping, Sequence
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class CommandTimeoutError(RuntimeError):
+    """Raised when a classifier is stopped before its scheduler allocation."""
+
+
 NETWORK_FILESYSTEMS = {"cifs", "gpfs", "lustre", "nfs", "nfs4", "smb3"}
 
 
@@ -193,7 +200,7 @@ def run_command(
                     timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired as error:
-                raise RuntimeError(
+                raise CommandTimeoutError(
                     f"Command exceeded its {timeout_seconds}-second time limit: {command[0]}"
                 ) from error
         finally:
@@ -211,8 +218,21 @@ def run_pipeline(
     commands: Sequence[Sequence[str]],
     log_path: Path,
     stdout_path: Path | None = None,
+    timeout_seconds: int | None = None,
 ) -> None:
-    """Run a shell-free subprocess pipeline and check every component."""
+    """Run a shell-free subprocess pipeline and check every component.
+
+    Args:
+        commands: Ordered command argument vectors.
+        log_path: File receiving command and error output.
+        stdout_path: Optional binary output file for the final process.
+        timeout_seconds: Optional total wall-clock limit for the pipeline.
+
+    Raises:
+        CommandTimeoutError: If the pipeline exceeds its time limit.
+        RuntimeError: If any pipeline process exits unsuccessfully.
+        ValueError: If the pipeline is empty.
+    """
     if not commands or any(not command for command in commands):
         raise ValueError("Pipeline commands must not be empty")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,6 +247,7 @@ def run_pipeline(
         processes: list[subprocess.Popen[str]] = []
         output_handle: BinaryIO | None = None
         previous_stdout = None
+        started = time.monotonic()
         try:
             if stdout_path is not None:
                 output_handle = stdout_path.open("wb")
@@ -249,7 +270,27 @@ def run_pipeline(
                     previous_stdout.close()
                 previous_stdout = process.stdout if not is_last else None
                 processes.append(process)
-            return_codes = [process.wait() for process in processes]
+            return_codes: list[int] = []
+            for process in processes:
+                remaining = None
+                if timeout_seconds is not None:
+                    remaining = max(0.001, timeout_seconds - (time.monotonic() - started))
+                try:
+                    return_codes.append(process.wait(timeout=remaining))
+                except subprocess.TimeoutExpired as error:
+                    for running_process in processes:
+                        if running_process.poll() is None:
+                            running_process.terminate()
+                    for running_process in processes:
+                        try:
+                            running_process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            running_process.kill()
+                            running_process.wait()
+                    raise CommandTimeoutError(
+                        "Pipeline exceeded its "
+                        f"{timeout_seconds}-second time limit: {commands[0][0]}"
+                    ) from error
         finally:
             if previous_stdout is not None:
                 previous_stdout.close()

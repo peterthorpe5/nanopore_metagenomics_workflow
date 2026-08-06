@@ -617,8 +617,8 @@ class TestToolAdaptersAndHelpers(unittest.TestCase):
         output.mkdir()
         target = "kraken:taxid|1|reference_a"
 
-        def fake_pipeline(*, commands, log_path, stdout_path=None):
-            del commands, log_path
+        def fake_pipeline(*, commands, log_path, stdout_path=None, timeout_seconds=None):
+            del commands, log_path, timeout_seconds
             assert stdout_path is not None
             with gzip.open(stdout_path, "wt", encoding="utf-8") as handle:
                 handle.write(f"read_1\t1000\t0\t900\t+\t{target}\t2000\t0\t900\t850\t900\t60\n")

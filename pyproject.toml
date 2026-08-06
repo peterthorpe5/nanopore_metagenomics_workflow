@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanopore-realdata-workflow"
-version = "0.2.0"
-description = "Host-aware Kraken2, Metabuli, minimap2 and optional KmerSutra classification of real Nanopore samples"
+version = "0.3.0"
+description = "Failure-tolerant real Nanopore classification with offline multi-classifier HTML reporting"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
@@ -23,6 +23,7 @@ workflow = [
 test = [
     "build>=1.2",
     "coverage[toml]>=7.6",
+    "pytest>=8",
     "ruff>=0.12",
 ]
 

@@ -29,6 +29,7 @@ ACTIONS = (
     "host-deplete",
     "classify",
     "aggregate",
+    "report",
     "run",
 )
 
@@ -37,8 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the named-argument-only command parser."""
     parser = argparse.ArgumentParser(
         description=(
-            "Remove host reads from real Nanopore FASTQs and classify non-host "
-            "reads with Kraken2, Metabuli and optional KmerSutra."
+            "Prepare real Nanopore FASTQs, classify them independently with "
+            "Kraken2, Metabuli, minimap2 and KmerSutra, and build failure-aware "
+            "offline reports."
         )
     )
     parser.add_argument("--action", required=True, choices=ACTIONS)
@@ -167,6 +169,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 value=args.completion,
                 option="--completion",
             ),
+        )
+        return 0
+    if args.action == "report":
+        workflow = load_workflow_config(config_path=args.config)
+        aggregate_results(
+            config_path=args.config,
+            completion_path=(workflow.output_directory / "03_final" / "workflow.complete.json"),
         )
         return 0
     snakefile = args.snakefile or Path(__file__).with_name("Snakefile")

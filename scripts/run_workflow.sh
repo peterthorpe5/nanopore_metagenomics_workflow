@@ -112,4 +112,21 @@ COMMAND+=("${TARGETS[@]}")
 COMMAND+=("${RESOURCE_OVERRIDES[@]}")
 
 printf 'Starting real-data workflow at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+set +e
 "${COMMAND[@]}"
+WORKFLOW_EXIT_CODE=$?
+set -e
+
+if [[ "${WORKFLOW_EXIT_CODE}" -ne 0 \
+    && "${DRY_RUN}" == false \
+    && "${UNLOCK}" == false ]]; then
+    printf 'Workflow exited with code %s; attempting a truthful partial report.\n' \
+        "${WORKFLOW_EXIT_CODE}" >&2
+    if nanopore-realdata --action report --config "${CONFIG_PATH}" --verbose; then
+        printf 'Partial report generated; the original workflow failure remains unresolved.\n' >&2
+    else
+        printf 'Partial reporting was not possible, usually because core input preparation failed.\n' >&2
+    fi
+fi
+
+exit "${WORKFLOW_EXIT_CODE}"

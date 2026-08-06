@@ -53,6 +53,8 @@ COMMAND=(
     --config "${CONFIG_PATH}"
     --profile "${PROFILE_PATH}"
     --jobs 10
+    --set-resource classify_kmersutra:runtime=40320
+    --set-resource classify_kmersutra:slurm_qos=4week
     --verbose
 )
 

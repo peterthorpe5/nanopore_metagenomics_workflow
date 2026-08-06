@@ -28,6 +28,7 @@ minimap2:
   index: ""
   min_mapq: 15
   min_alignment: 500
+  failure_policy: continue
 
 execution:
   # Dundee compute jobs expose a job-specific, node-local XFS filesystem here.
@@ -59,10 +60,12 @@ resources:
 
 kraken2:
   confidence: 0.0
+  failure_policy: continue
 
 metabuli:
   min_score: 0.008
   max_ram_gb: 120
+  failure_policy: continue
 
 kmersutra:
   enabled: true
@@ -79,3 +82,11 @@ kmersutra:
 provenance:
   # Full input checksums are safest but add one complete read of each FASTQ.
   checksum_inputs: true
+
+reporting:
+  # Case-insensitive taxon-name fragments highlighted throughout the reports.
+  focus_taxa:
+    - Plasmodium
+  top_n: 20
+  # Complete TSV/JSON outputs are retained; only HTML display rows are capped.
+  max_table_rows: 5000

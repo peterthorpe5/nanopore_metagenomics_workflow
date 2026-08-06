@@ -39,18 +39,6 @@ HOST_SUMMARIES = [
 ]
 HOST_STAGE = OUTPUT_ROOT / "01_host_depletion" / "stage.complete.json"
 
-KRAKEN_REPORTS = [
-    OUTPUT_ROOT / "02_classification" / "kraken2" / sample_id / "report.tsv"
-    for sample_id in SAMPLE_IDS
-]
-METABULI_REPORTS = [
-    OUTPUT_ROOT / "02_classification" / "metabuli" / sample_id / "report.tsv"
-    for sample_id in SAMPLE_IDS
-]
-MINIMAP_REPORTS = [
-    OUTPUT_ROOT / "02_classification" / "minimap2" / sample_id / "taxon_report.tsv"
-    for sample_id in SAMPLE_IDS
-]
 KRAKEN_STAGE = OUTPUT_ROOT / "02_classification" / "kraken2" / "stage.complete.json"
 METABULI_STAGE = OUTPUT_ROOT / "02_classification" / "metabuli" / "stage.complete.json"
 MINIMAP_STAGE = OUTPUT_ROOT / "02_classification" / "minimap2" / "stage.complete.json"
@@ -65,13 +53,30 @@ KMERSUTRA_STAGES = [
 
 FINAL_ROOT = OUTPUT_ROOT / "03_final"
 FINAL_COMPLETION = FINAL_ROOT / "workflow.complete.json"
+CLASSIFIER_REPORTS = [
+    FINAL_ROOT / "reports" / "classifiers" / f"{method}.html"
+    for method in ("kraken2", "metabuli", "minimap2", "kmersutra")
+]
+SAMPLE_REPORTS = [
+    FINAL_ROOT / "reports" / "samples" / f"{sample_id}.html"
+    for sample_id in SAMPLE_IDS
+]
 FINAL_OUTPUTS = [
     FINAL_ROOT / "sample_summary.tsv",
+    FINAL_ROOT / "classifier_status.tsv",
     FINAL_ROOT / "classifier_taxon_reports.tsv.gz",
     FINAL_ROOT / "minimap2_taxon_reports.tsv.gz",
     FINAL_ROOT / "kmersutra_species_calls.tsv.gz",
+    FINAL_ROOT / "normalised_classifier_evidence.tsv.gz",
+    FINAL_ROOT / "report_warnings.tsv",
+    FINAL_ROOT / "report_data.json",
+    FINAL_ROOT / "report_manifest.json",
     FINAL_ROOT / "README.txt",
     FINAL_ROOT / "SHA256SUMS.tsv",
+    FINAL_ROOT / "reports" / "index.html",
+    FINAL_ROOT / "reports" / "comparison.html",
+    *CLASSIFIER_REPORTS,
+    *SAMPLE_REPORTS,
     FINAL_COMPLETION,
 ]
 
@@ -88,12 +93,6 @@ rule preflight:
         host_reference=(
             [str(WORKFLOW.host_reference)]
             if WORKFLOW.host_reference is not None
-            else []
-        ),
-        minimap_reference=str(WORKFLOW.minimap_reference),
-        minimap_index=(
-            [str(WORKFLOW.minimap_index)]
-            if WORKFLOW.minimap_index is not None
             else []
         ),
         fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
@@ -185,9 +184,7 @@ if WORKFLOW.minimap_index is None:
         input:
             config=str(CONFIG_PATH),
             preflight=str(PREFLIGHT),
-            reference=str(WORKFLOW.minimap_reference),
         output:
-            index=str(MINIMAP_INDEX),
             completion=str(MINIMAP_INDEX_COMPLETION),
         threads: WORKFLOW.threads_minimap2
         resources:
@@ -197,9 +194,14 @@ if WORKFLOW.minimap_index is None:
         run:
             build_minimap_index(
                 config_path=Path(input.config),
-                output_index=Path(output.index),
+                output_index=Path(MINIMAP_INDEX),
                 output_completion=Path(output.completion),
             )
+
+
+MINIMAP_READY = (
+    MINIMAP_INDEX_COMPLETION if WORKFLOW.minimap_index is None else PREFLIGHT
+)
 
 
 rule classify_kraken2:
@@ -208,7 +210,6 @@ rule classify_kraken2:
         host_stage=str(HOST_STAGE),
         fastqs=[str(path) for path in HOST_FASTQS],
     output:
-        reports=[str(path) for path in KRAKEN_REPORTS],
         stage=str(KRAKEN_STAGE),
     threads: WORKFLOW.threads_kraken2
     resources:
@@ -229,7 +230,6 @@ rule classify_metabuli:
         host_stage=str(HOST_STAGE),
         fastqs=[str(path) for path in HOST_FASTQS],
     output:
-        reports=[str(path) for path in METABULI_REPORTS],
         stage=str(METABULI_STAGE),
     threads: WORKFLOW.threads_metabuli
     resources:
@@ -248,11 +248,9 @@ rule classify_minimap2:
     input:
         config=str(CONFIG_PATH),
         host_stage=str(HOST_STAGE),
-        index=str(MINIMAP_INDEX),
-        reference=str(WORKFLOW.minimap_reference),
+        index_ready=str(MINIMAP_READY),
         fastqs=[str(path) for path in HOST_FASTQS],
     output:
-        reports=[str(path) for path in MINIMAP_REPORTS],
         stage=str(MINIMAP_STAGE),
     threads: WORKFLOW.threads_minimap2
     resources:
@@ -300,26 +298,17 @@ rule aggregate:
     input:
         config=str(CONFIG_PATH),
         host_summaries=[str(path) for path in HOST_SUMMARIES],
-        kraken_reports=[str(path) for path in KRAKEN_REPORTS],
-        metabuli_reports=[str(path) for path in METABULI_REPORTS],
-        minimap_reports=[str(path) for path in MINIMAP_REPORTS],
         kraken_stage=str(KRAKEN_STAGE),
         metabuli_stage=str(METABULI_STAGE),
         minimap_stage=str(MINIMAP_STAGE),
         kmersutra_stages=[str(path) for path in KMERSUTRA_STAGES],
     output:
-        summary=str(FINAL_OUTPUTS[0]),
-        taxon_reports=str(FINAL_OUTPUTS[1]),
-        minimap_reports=str(FINAL_OUTPUTS[2]),
-        kmersutra_calls=str(FINAL_OUTPUTS[3]),
-        readme=str(FINAL_OUTPUTS[4]),
-        checksums=str(FINAL_OUTPUTS[5]),
-        completion=str(FINAL_OUTPUTS[6]),
+        [str(path) for path in FINAL_OUTPUTS]
     resources:
         mem_mb=4096,
         runtime=60,
     run:
         aggregate_results(
             config_path=Path(input.config),
-            completion_path=Path(output.completion),
+            completion_path=Path(FINAL_COMPLETION),
         )
