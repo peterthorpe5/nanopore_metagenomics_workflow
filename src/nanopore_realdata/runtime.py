@@ -143,10 +143,7 @@ def write_completion(
         "status": "success",
         "completed_at_utc": utc_now(),
         "signature": signature,
-        "outputs": [
-            {"path": str(path), "size_bytes": path.stat().st_size}
-            for path in outputs
-        ],
+        "outputs": [{"path": str(path), "size_bytes": path.stat().st_size} for path in outputs],
     }
     if extra:
         payload.update(extra)
@@ -306,9 +303,7 @@ def validate_scratch(*, scratch_root: Path, minimum_gb: int) -> dict[str, Any]:
         raise ValueError(f"Scratch root is not a directory: {resolved}")
     filesystem = filesystem_type(path=resolved)
     if filesystem in NETWORK_FILESYSTEMS:
-        raise ValueError(
-            f"Scratch root uses network filesystem {filesystem!r}: {resolved}"
-        )
+        raise ValueError(f"Scratch root uses network filesystem {filesystem!r}: {resolved}")
     usage = shutil.disk_usage(resolved)
     required = minimum_gb * 1024**3
     if usage.free < required:
@@ -330,9 +325,7 @@ def validate_scratch(*, scratch_root: Path, minimum_gb: int) -> dict[str, Any]:
 def scratch_workspace(*, scratch_root: Path, label: str) -> Iterator[Path]:
     """Create and always remove a bounded job-local workspace."""
     safe_label = "".join(character if character.isalnum() else "_" for character in label)
-    workspace = Path(
-        tempfile.mkdtemp(prefix=f"nanopore_realdata.{safe_label}.", dir=scratch_root)
-    )
+    workspace = Path(tempfile.mkdtemp(prefix=f"nanopore_realdata.{safe_label}.", dir=scratch_root))
     LOGGER.info("Created node-local workspace: %s", workspace)
     try:
         yield workspace

@@ -1,0 +1,12 @@
+sample_id	fastq	run_id	barcode	description
+MRC0123_AmM001WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0123_AmM001WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0223_AmM002WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0223_AmM002WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0323_BiM003WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0323_BiM003WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0423_BiM001WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0423_BiM001WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0523_AmM006WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0523_AmM006WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0623_BiM002WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0623_BiM002WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0723_AmM007WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0723_AmM007WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0823_BiM004WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0823_BiM004WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC0923_BiM005WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC0923_BiM005WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC1023_AmM008WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC1023_AmM008WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads
+MRC1123_WuH001WB	/home/pthorpe001/data/2026_plasmodium_kraken_sensitivity/real_reads/MRC1123_WuH001WB.host_removed_v4_nem_ton_nig.2-50kbp_reads.fq.gz	real_reads_20260806		already host-removed 2-50 kbp reads

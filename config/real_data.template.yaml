@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 run:
   id: nanopore_real_data_v1
@@ -6,8 +6,11 @@ run:
 
 inputs:
   samples: /absolute/path/to/samples.tsv
+  # Use host_removed when the supplied FASTQs have already been depleted.
+  read_state: raw
 
 host:
+  # Both values may be blank when inputs.read_state is host_removed.
   reference: /absolute/path/to/host_reference.fasta
   # Leave blank to build one persistent minimap2 index during the workflow.
   index: ""
@@ -17,6 +20,14 @@ databases:
   metabuli: /absolute/path/to/metabuli_database
   # May be blank only when kmersutra.enabled is false.
   kmersutra_panel: /absolute/path/to/species_kmer_panel.tsv.gz
+
+minimap2:
+  # Controlled classification reference; this is not the host reference.
+  reference: /absolute/path/to/classification_reference.cleaned.fa
+  # Leave blank to build a run-local index bound to the configured FASTA.
+  index: ""
+  min_mapq: 15
+  min_alignment: 500
 
 execution:
   # Dundee compute jobs expose a job-specific, node-local XFS filesystem here.
@@ -32,14 +43,17 @@ resources:
   host_threads: 16
   kraken2_threads: 12
   metabuli_threads: 12
+  minimap2_threads: 12
   kmersutra_threads: 24
   host_memory_mb: 64000
   kraken2_memory_mb: 96000
   metabuli_memory_mb: 160000
+  minimap2_memory_mb: 64000
   kmersutra_memory_mb: 96000
   host_runtime_minutes: 1440
   kraken2_runtime_minutes: 2880
   metabuli_runtime_minutes: 2880
+  minimap2_runtime_minutes: 2880
   # Normal three-day ceiling. Do not use the 4week QoS unless evidence shows it is needed.
   kmersutra_runtime_minutes: 4320
 

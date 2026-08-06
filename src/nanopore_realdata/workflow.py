@@ -18,6 +18,7 @@ from nanopore_realdata.commands import (
     kmersutra_command,
     kraken2_command,
     metabuli_command,
+    minimap2_classification_command,
     minimap2_host_command,
     minimap2_index_command,
     pigz_command,
@@ -27,6 +28,7 @@ from nanopore_realdata.commands import (
     samtools_non_host_fastq_command,
 )
 from nanopore_realdata.config import Sample, WorkflowConfig, load_workflow_config
+from nanopore_realdata.minimap import summarise_minimap_paf
 from nanopore_realdata.runtime import (
     capture_output,
     completion_is_valid,
@@ -56,12 +58,11 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         output_path: Declared preflight JSON output.
     """
     workflow = load_workflow_config(config_path=config_path)
-    actions = [
-        "build-host-index",
-        "host-deplete",
-        "classify-kraken2",
-        "classify-metabuli",
-    ]
+    actions = ["classify-kraken2", "classify-metabuli", "classify-minimap2"]
+    if workflow.input_read_state == "raw":
+        actions.extend(("build-host-index", "host-deplete"))
+    else:
+        actions.append("accept-host-removed")
     if workflow.kmersutra_enabled:
         actions.append("classify-kmersutra")
     for action in actions:
@@ -92,11 +93,7 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         "samtools": _version(command=["samtools", "--version"]),
         "kraken2": _version(command=["kraken2", "--version"]),
         "metabuli": _version(command=["metabuli", "version"]),
-        "kmersutra": (
-            _kmersutra_version()
-            if workflow.kmersutra_enabled
-            else "disabled"
-        ),
+        "kmersutra": (_kmersutra_version() if workflow.kmersutra_enabled else "disabled"),
         "nanopore_realdata_workflow": __version__,
         "snakemake": _version(command=["snakemake", "--version"]),
         "rsync": _version(command=["rsync", "--version"]),
@@ -130,9 +127,14 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         "config": str(workflow.config_path),
         "config_sha256": sha256_file(path=workflow.config_path),
         "resources": {
-            "host_reference": metadata_fingerprint(
-                paths=[workflow.host_reference],
-                checksum_files=True,
+            "input_read_state": workflow.input_read_state,
+            "host_reference": (
+                metadata_fingerprint(
+                    paths=[_required_host_reference(workflow=workflow)],
+                    checksum_files=True,
+                )
+                if workflow.input_read_state == "raw"
+                else "not_applicable_already_host_removed"
             ),
             "kraken2_database": metadata_fingerprint(
                 paths=[workflow.kraken_database],
@@ -141,6 +143,18 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
             "metabuli_database": metadata_fingerprint(
                 paths=[workflow.metabuli_database],
                 checksum_files=False,
+            ),
+            "minimap2_reference": metadata_fingerprint(
+                paths=[workflow.minimap_reference],
+                checksum_files=True,
+            ),
+            "minimap2_index": (
+                metadata_fingerprint(
+                    paths=[workflow.minimap_index],
+                    checksum_files=True,
+                )
+                if workflow.minimap_index is not None
+                else "built_by_workflow_from_configured_reference"
             ),
             "kmersutra_panel": (
                 metadata_fingerprint(
@@ -164,9 +178,10 @@ def build_host_index(
 ) -> None:
     """Build the host minimap2 index once using node-local scratch."""
     workflow = load_workflow_config(config_path=config_path)
+    host_reference = _required_host_reference(workflow=workflow)
     signature = task_signature(
         task={"action": "build-host-index", "run_id": workflow.run_id},
-        inputs=[workflow.host_reference, workflow.config_path],
+        inputs=[host_reference, workflow.config_path],
         checksum_files=True,
     )
     if completion_is_valid(
@@ -182,11 +197,11 @@ def build_host_index(
         minimum_gb=workflow.minimum_scratch_gb,
     )
     with scratch_workspace(scratch_root=workflow.scratch_root, label="host_index") as workspace:
-        local_reference = workflow.host_reference
+        local_reference = host_reference
         stage_log = output_index.parent / "host_index.log"
         if workflow.stage_resources:
             local_reference = stage_resource(
-                source=workflow.host_reference,
+                source=host_reference,
                 destination_root=workspace / "reference",
                 log_path=stage_log,
             )
@@ -204,6 +219,64 @@ def build_host_index(
         signature=signature,
         outputs=[output_index],
         extra={"action": "build-host-index"},
+    )
+
+
+def build_minimap_index(
+    *,
+    config_path: Path,
+    output_index: Path,
+    output_completion: Path,
+) -> None:
+    """Build a checksum-bound classification index from the configured FASTA."""
+    workflow = load_workflow_config(config_path=config_path)
+    signature = task_signature(
+        task={"action": "build-minimap2-index", "run_id": workflow.run_id},
+        inputs=[workflow.minimap_reference, workflow.config_path],
+        checksum_files=True,
+    )
+    if completion_is_valid(
+        completion_path=output_completion,
+        signature=signature,
+        outputs=[output_index],
+    ):
+        LOGGER.info("Classification minimap2 index is already complete: %s", output_index)
+        return
+    _require_tools(action="build-host-index")
+    validate_scratch(
+        scratch_root=workflow.scratch_root,
+        minimum_gb=workflow.minimum_scratch_gb,
+    )
+    stage_log = output_index.parent / "minimap2_index.log"
+    with scratch_workspace(
+        scratch_root=workflow.scratch_root,
+        label="classification_minimap_index",
+    ) as workspace:
+        local_reference = workflow.minimap_reference
+        if workflow.stage_resources:
+            local_reference = stage_resource(
+                source=workflow.minimap_reference,
+                destination_root=workspace / "reference",
+                log_path=stage_log,
+            )
+        local_index = workspace / "classification_reference.mmi"
+        run_command(
+            command=minimap2_index_command(
+                reference=local_reference,
+                output_index=local_index,
+            ),
+            log_path=stage_log,
+        )
+        _publish_file(source=local_index, destination=output_index, log_path=stage_log)
+    write_completion(
+        completion_path=output_completion,
+        signature=signature,
+        outputs=[output_index],
+        extra={
+            "action": "build-minimap2-index",
+            "reference": str(workflow.minimap_reference),
+            "reference_sha256": sha256_file(path=workflow.minimap_reference),
+        },
     )
 
 
@@ -236,10 +309,7 @@ def host_deplete_batch(
                 stage_resource(
                     source=fastq_path,
                     destination_root=(
-                        workspace
-                        / "inputs"
-                        / sample.sample_id
-                        / f"part_{part_number:04d}"
+                        workspace / "inputs" / sample.sample_id / f"part_{part_number:04d}"
                     ),
                     log_path=stage_log,
                 )
@@ -253,7 +323,9 @@ def host_deplete_batch(
                 runtime_fastqs=local_fastqs,
                 workspace=workspace,
             )
-    declared = [_host_result_directory(workflow=workflow, sample=sample) for sample in workflow.samples]
+    declared = [
+        _host_result_directory(workflow=workflow, sample=sample) for sample in workflow.samples
+    ]
     write_json_atomic(
         path=stage_completion,
         payload={
@@ -262,6 +334,60 @@ def host_deplete_batch(
             "stage": "host_depletion",
             "sample_count": len(declared),
             "sample_directories": [str(path) for path in declared],
+        },
+    )
+
+
+def accept_host_removed_batch(*, config_path: Path, stage_completion: Path) -> None:
+    """Prepare already host-removed reads without repeating host depletion.
+
+    Args:
+        config_path: Workflow YAML path.
+        stage_completion: Declared batch completion record.
+
+    Raises:
+        ValueError: If the configuration does not declare host-removed inputs.
+    """
+    workflow = load_workflow_config(config_path=config_path)
+    if workflow.input_read_state != "host_removed":
+        raise ValueError("accept_host_removed_batch requires inputs.read_state=host_removed")
+    _require_tools(action="accept-host-removed")
+    validate_scratch(
+        scratch_root=workflow.scratch_root,
+        minimum_gb=workflow.minimum_scratch_gb,
+    )
+    stage_root = stage_completion.parent
+    stage_root.mkdir(parents=True, exist_ok=True)
+    stage_log = stage_root / "resource_staging.log"
+    with scratch_workspace(
+        scratch_root=workflow.scratch_root,
+        label="accept_host_removed",
+    ) as workspace:
+        for sample in workflow.samples:
+            local_fastqs = tuple(
+                stage_resource(
+                    source=fastq_path,
+                    destination_root=(
+                        workspace / "inputs" / sample.sample_id / f"part_{part_number:04d}"
+                    ),
+                    log_path=stage_log,
+                )
+                for part_number, fastq_path in enumerate(sample.fastq_paths, start=1)
+            )
+            _accept_host_removed_sample(
+                workflow=workflow,
+                sample=sample,
+                runtime_fastqs=local_fastqs,
+                workspace=workspace,
+            )
+    write_json_atomic(
+        path=stage_completion,
+        payload={
+            "status": "success",
+            "completed_at_utc": utc_now(),
+            "stage": "accept_host_removed",
+            "sample_count": len(workflow.samples),
+            "host_depletion_performed": False,
         },
     )
 
@@ -279,7 +405,7 @@ def classify_batch(
     timeout and failure state are isolated. Kraken2 and Metabuli deliberately
     remain bundled to stage each large database only once.
     """
-    if method not in {"kraken2", "metabuli", "kmersutra"}:
+    if method not in {"kraken2", "metabuli", "minimap2", "kmersutra"}:
         raise ValueError(f"Unsupported classifier method: {method}")
     workflow = load_workflow_config(config_path=config_path)
     selected_samples = workflow.samples
@@ -306,10 +432,14 @@ def classify_batch(
         scratch_root=workflow.scratch_root,
         minimum_gb=workflow.minimum_scratch_gb,
     )
+    reference_fasta: Path | None = None
     if method == "kraken2":
         resource = workflow.kraken_database
     elif method == "metabuli":
         resource = workflow.metabuli_database
+    elif method == "minimap2":
+        resource = _resolved_minimap_index(workflow=workflow)
+        reference_fasta = workflow.minimap_reference
     else:
         resource = _required_kmersutra_panel(workflow=workflow)
     stage_root = stage_completion.parent
@@ -323,6 +453,13 @@ def classify_batch(
                 destination_root=workspace / "resource",
                 log_path=stage_log,
             )
+        local_reference = reference_fasta
+        if workflow.stage_resources and reference_fasta is not None:
+            local_reference = stage_resource(
+                source=reference_fasta,
+                destination_root=workspace / "reference_fasta",
+                log_path=stage_log,
+            )
         for sample in selected_samples:
             try:
                 _classify_sample(
@@ -330,7 +467,10 @@ def classify_batch(
                     sample=sample,
                     method=method,
                     resource=local_resource,
-                    signature_resource=resource,
+                    signature_resources=tuple(
+                        path for path in (resource, reference_fasta) if path is not None
+                    ),
+                    reference_fasta=local_reference,
                     workspace=workspace,
                 )
             except Exception as error:
@@ -340,11 +480,14 @@ def classify_batch(
                     "KmerSutra failed for %s; continuing as configured",
                     sample.sample_id,
                 )
-                failure_path = _method_result_directory(
-                    workflow=workflow,
-                    sample=sample,
-                    method=method,
-                ) / "failure.json"
+                failure_path = (
+                    _method_result_directory(
+                        workflow=workflow,
+                        sample=sample,
+                        method=method,
+                    )
+                    / "failure.json"
+                )
                 write_json_atomic(
                     path=failure_path,
                     payload={
@@ -386,6 +529,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     final_root.mkdir(parents=True, exist_ok=True)
     sample_rows: list[dict[str, Any]] = []
     taxon_rows: list[dict[str, Any]] = []
+    minimap_rows: list[dict[str, Any]] = []
     kmersutra_rows: list[dict[str, Any]] = []
     for sample in workflow.samples:
         host_summary = _read_single_tsv(
@@ -395,6 +539,8 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         sample_rows.append(
             {
                 **host_summary,
+                "input_read_state": workflow.input_read_state,
+                "host_depletion_performed": str(workflow.input_read_state == "raw").lower(),
                 "kraken2_status": _method_status(
                     workflow=workflow,
                     sample=sample,
@@ -404,6 +550,11 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                     workflow=workflow,
                     sample=sample,
                     method="metabuli",
+                ),
+                "minimap2_status": _method_status(
+                    workflow=workflow,
+                    sample=sample,
+                    method="minimap2",
                 ),
                 "kmersutra_status": _method_status(
                     workflow=workflow,
@@ -424,6 +575,20 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                     method=method,
                 )
             )
+        minimap_rows.extend(
+            _read_rows_with_method(
+                path=(
+                    _method_result_directory(
+                        workflow=workflow,
+                        sample=sample,
+                        method="minimap2",
+                    )
+                    / "taxon_report.tsv"
+                ),
+                sample_id=sample.sample_id,
+                method="minimap2",
+            )
+        )
         calls = (
             _method_result_directory(
                 workflow=workflow,
@@ -433,9 +598,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             / "species_detection_calls.tsv"
         )
         if calls.is_file():
-            kmersutra_rows.extend(
-                _read_rows_with_prefix(path=calls, sample_id=sample.sample_id)
-            )
+            kmersutra_rows.extend(_read_rows_with_prefix(path=calls, sample_id=sample.sample_id))
         else:
             kmersutra_rows.append(
                 {
@@ -452,6 +615,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     summary_path = final_root / "sample_summary.tsv"
     taxon_path = final_root / "classifier_taxon_reports.tsv.gz"
     calls_path = final_root / "kmersutra_species_calls.tsv.gz"
+    minimap_path = final_root / "minimap2_taxon_reports.tsv.gz"
     _write_tsv(
         path=summary_path,
         rows=sample_rows,
@@ -461,8 +625,11 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "non_host_reads",
             "host_reads_removed",
             "host_fraction",
+            "input_read_state",
+            "host_depletion_performed",
             "kraken2_status",
             "metabuli_status",
+            "minimap2_status",
             "kmersutra_status",
         ),
     )
@@ -480,15 +647,27 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "taxon_name",
         ),
     )
-    calls_fields = tuple(
-        dict.fromkeys(key for row in kmersutra_rows for key in row)
-    )
+    calls_fields = tuple(dict.fromkeys(key for row in kmersutra_rows for key in row))
     _write_tsv(path=calls_path, rows=kmersutra_rows, fieldnames=calls_fields)
+    minimap_fields = tuple(dict.fromkeys(key for row in minimap_rows for key in row)) or (
+        "sample_id",
+        "method",
+        "tax_id",
+        "taxon_name",
+        "best_read_count",
+        "ambiguous_best_read_count",
+        "alignment_count",
+        "reference_count",
+        "min_mapq",
+        "min_alignment",
+    )
+    _write_tsv(path=minimap_path, rows=minimap_rows, fieldnames=minimap_fields)
     readme_path = final_root / "README.txt"
     readme_path.write_text(
         "Nanopore real-data workflow final results\n\n"
         "sample_summary.tsv contains host-removal totals and stage status.\n"
         "classifier_taxon_reports.tsv.gz harmonises Kraken2 and Metabuli reports.\n"
+        "minimap2_taxon_reports.tsv.gz summarises controlled-reference best alignments.\n"
         "kmersutra_species_calls.tsv.gz combines KmerSutra species calls.\n"
         "SHA256SUMS.tsv records final-file checksums.\n",
         encoding="utf-8",
@@ -496,7 +675,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     checksum_path = final_root / "SHA256SUMS.tsv"
     checksum_rows = [
         {"sha256": sha256_file(path=path), "file": path.name}
-        for path in (summary_path, taxon_path, calls_path, readme_path)
+        for path in (summary_path, taxon_path, minimap_path, calls_path, readme_path)
     ]
     _write_tsv(
         path=checksum_path,
@@ -512,7 +691,14 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "sample_count": len(workflow.samples),
             "outputs": [
                 str(path)
-                for path in (summary_path, taxon_path, calls_path, readme_path, checksum_path)
+                for path in (
+                    summary_path,
+                    taxon_path,
+                    minimap_path,
+                    calls_path,
+                    readme_path,
+                    checksum_path,
+                )
             ],
         },
     )
@@ -652,7 +838,9 @@ def _host_deplete_sample(
                     "input_reads": total_reads,
                     "non_host_reads": non_host_reads,
                     "host_reads_removed": removed,
-                    "host_fraction": f"{removed / total_reads:.8f}" if total_reads else "0.00000000",
+                    "host_fraction": f"{removed / total_reads:.8f}"
+                    if total_reads
+                    else "0.00000000",
                 }
             ],
             fieldnames=(
@@ -688,13 +876,106 @@ def _host_deplete_sample(
         raise
 
 
+def _accept_host_removed_sample(
+    *,
+    workflow: WorkflowConfig,
+    sample: Sample,
+    runtime_fastqs: Sequence[Path],
+    workspace: Path,
+) -> None:
+    """Validate and publish classification-ready host-removed FASTQ parts."""
+    final = _host_result_directory(workflow=workflow, sample=sample)
+    output_fastq = final / "non_host.fastq.gz"
+    summary = final / "host_removal_summary.tsv"
+    metadata = final / "metadata.json"
+    completion = final / "complete.json"
+    signature = task_signature(
+        task={
+            "action": "accept-host-removed",
+            "sample_id": sample.sample_id,
+            "input_read_state": workflow.input_read_state,
+        },
+        inputs=[*sample.fastq_paths, workflow.config_path],
+        checksum_files=workflow.checksum_inputs,
+    )
+    if completion_is_valid(
+        completion_path=completion,
+        signature=signature,
+        outputs=[output_fastq, summary, metadata],
+    ):
+        LOGGER.info("Skipping valid host-removed input preparation: %s", sample.sample_id)
+        return
+    local = workspace / "samples" / sample.sample_id
+    shutil.rmtree(local, ignore_errors=True)
+    local.mkdir(parents=True)
+    try:
+        read_count = _merge_fastq_parts(
+            input_paths=runtime_fastqs,
+            output_path=local / "non_host.fastq.gz",
+        )
+        _write_tsv(
+            path=local / "host_removal_summary.tsv",
+            rows=[
+                {
+                    "sample_id": sample.sample_id,
+                    "input_reads": read_count,
+                    "non_host_reads": read_count,
+                    "host_reads_removed": 0,
+                    "host_fraction": "0.00000000",
+                    "input_read_state": "host_removed",
+                    "host_depletion_performed": "false",
+                }
+            ],
+            fieldnames=(
+                "sample_id",
+                "input_reads",
+                "non_host_reads",
+                "host_reads_removed",
+                "host_fraction",
+                "input_read_state",
+                "host_depletion_performed",
+            ),
+        )
+        write_json_atomic(
+            path=local / "metadata.json",
+            payload={
+                "sample_id": sample.sample_id,
+                "status": "success",
+                "input_fastqs": [str(path) for path in sample.fastq_paths],
+                "input_read_state": "host_removed",
+                "host_depletion_performed": False,
+                "read_count": read_count,
+                "completed_at_utc": utc_now(),
+            },
+        )
+        publish_directory(
+            source=local,
+            destination=final,
+            log_path=local / "input_preparation.log",
+        )
+        write_completion(
+            completion_path=completion,
+            signature=signature,
+            outputs=[output_fastq, summary, metadata],
+            extra={
+                "sample_id": sample.sample_id,
+                "action": "accept-host-removed",
+                "host_depletion_performed": False,
+            },
+        )
+    except Exception:
+        _publish_failed_attempt(source=local, destination=final)
+        raise
+
+
 def _classify_sample(
     *,
     workflow: WorkflowConfig,
     sample: Sample,
     method: str,
     resource: Path,
-    signature_resource: Path,
+    signature_resources: Sequence[Path],
+    reference_fasta: Path | None,
     workspace: Path,
 ) -> None:
     input_fastq = _host_result_directory(workflow=workflow, sample=sample) / "non_host.fastq.gz"
@@ -710,7 +991,7 @@ def _classify_sample(
     task = _method_task_settings(workflow=workflow, sample=sample, method=method)
     signature = task_signature(
         task=task,
-        inputs=[input_fastq, signature_resource, workflow.config_path],
+        inputs=[input_fastq, *signature_resources, workflow.config_path],
         checksum_files=False,
     )
     if completion_is_valid(
@@ -748,6 +1029,18 @@ def _classify_sample(
                 output_directory=local,
                 log_path=log_path,
             )
+        elif method == "minimap2":
+            if reference_fasta is None:
+                raise ValueError("Classification minimap2 requires a reference FASTA")
+            _run_minimap2(
+                workflow=workflow,
+                sample=sample,
+                input_fastq=runtime_input,
+                reference_index=resource,
+                reference_fasta=reference_fasta,
+                output_directory=local,
+                log_path=log_path,
+            )
         else:
             _run_kmersutra(
                 workflow=workflow,
@@ -764,7 +1057,7 @@ def _classify_sample(
                 "method": method,
                 "status": "success",
                 "input_fastq": str(input_fastq),
-                "resource": str(signature_resource),
+                "resources": [str(path) for path in signature_resources],
                 "settings": task,
                 "tool_version": _method_version(method=method),
                 "completed_at_utc": utc_now(),
@@ -855,6 +1148,43 @@ def _run_metabuli(
         raise RuntimeError(f"Metabuli produced no report for {sample.sample_id}")
 
 
+def _run_minimap2(
+    *,
+    workflow: WorkflowConfig,
+    sample: Sample,
+    input_fastq: Path,
+    reference_index: Path,
+    reference_fasta: Path,
+    output_directory: Path,
+    log_path: Path,
+) -> None:
+    """Map reads to the controlled reference and write filtered taxon summaries."""
+    paf_path = output_directory / "alignments.paf.gz"
+    run_pipeline(
+        commands=[
+            minimap2_classification_command(
+                reference_index=reference_index,
+                input_fastq=input_fastq,
+                threads=workflow.threads_minimap2,
+            ),
+            pigz_command(threads=workflow.threads_minimap2),
+        ],
+        log_path=log_path,
+        stdout_path=paf_path,
+    )
+    summarise_minimap_paf(
+        paf_path=paf_path,
+        reference_fasta=reference_fasta,
+        taxon_report_path=output_directory / "taxon_report.tsv",
+        mapping_summary_path=output_directory / "mapping_summary.tsv",
+        sample_id=sample.sample_id,
+        minimum_mapq=workflow.minimap_min_mapq,
+        minimum_alignment=workflow.minimap_min_alignment,
+    )
+    if not workflow.keep_per_read_classifications:
+        paf_path.unlink()
+
+
 def _run_kmersutra(
     *,
     workflow: WorkflowConfig,
@@ -915,8 +1245,21 @@ def _method_expected_outputs(
     if method in {"kraken2", "metabuli"}:
         outputs.append(directory / "report.tsv")
         if keep_per_read:
-            name = "classifications.tsv.gz" if method == "kraken2" else "metabuli_classifications.tsv.gz"
+            name = (
+                "classifications.tsv.gz"
+                if method == "kraken2"
+                else "metabuli_classifications.tsv.gz"
+            )
             outputs.append(directory / name)
+    elif method == "minimap2":
+        outputs.extend(
+            [
+                directory / "taxon_report.tsv",
+                directory / "mapping_summary.tsv",
+            ]
+        )
+        if keep_per_read:
+            outputs.append(directory / "alignments.paf.gz")
     else:
         outputs.extend(
             [
@@ -949,6 +1292,12 @@ def _method_task_settings(
             min_score=workflow.metabuli_min_score,
             max_ram_gb=workflow.metabuli_max_ram_gb,
         )
+    elif method == "minimap2":
+        common.update(
+            threads=workflow.threads_minimap2,
+            min_mapq=workflow.minimap_min_mapq,
+            min_alignment=workflow.minimap_min_alignment,
+        )
     else:
         common.update(
             threads=workflow.threads_kmersutra,
@@ -976,11 +1325,14 @@ def _method_result_directory(
 def _method_status(*, workflow: WorkflowConfig, sample: Sample, method: str) -> str:
     if method == "kmersutra" and not workflow.kmersutra_enabled:
         return "disabled"
-    path = _method_result_directory(
-        workflow=workflow,
-        sample=sample,
-        method=method,
-    ) / "complete.json"
+    path = (
+        _method_result_directory(
+            workflow=workflow,
+            sample=sample,
+            method=method,
+        )
+        / "complete.json"
+    )
     if not path.is_file():
         failure = path.with_name("failure.json")
         if failure.is_file():
@@ -1024,10 +1376,19 @@ def _parse_classifier_report(
 def _read_rows_with_prefix(*, path: Path, sample_id: str) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
-    return [
-        {"sample_id": sample_id, "method": "kmersutra", **row}
-        for row in rows
-    ]
+    return [{"sample_id": sample_id, "method": "kmersutra", **row} for row in rows]
+
+
+def _read_rows_with_method(
+    *,
+    path: Path,
+    sample_id: str,
+    method: str,
+) -> list[dict[str, Any]]:
+    """Read a TSV and enforce its workflow sample and method fields."""
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    return [{**row, "sample_id": sample_id, "method": method} for row in rows]
 
 
 def _read_single_tsv(*, path: Path) -> dict[str, str]:
@@ -1036,6 +1397,44 @@ def _read_single_tsv(*, path: Path) -> dict[str, str]:
     if len(rows) != 1:
         raise ValueError(f"Expected exactly one data row in {path}")
     return rows[0]
+
+
+def _merge_fastq_parts(*, input_paths: Sequence[Path], output_path: Path) -> int:
+    """Validate, merge and gzip one or more FASTQ parts.
+
+    Args:
+        input_paths: Ordered FASTQ or FASTQ.GZ parts for one sample.
+        output_path: Gzip-compressed merged FASTQ path.
+
+    Returns:
+        Number of validated FASTQ records written.
+
+    Raises:
+        ValueError: If inputs are absent or a FASTQ record is malformed.
+    """
+    if not input_paths:
+        raise ValueError("At least one FASTQ part is required")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    read_count = 0
+    with gzip.open(output_path, "wt", encoding="utf-8", newline="") as output_handle:
+        for input_path in input_paths:
+            opener = gzip.open if str(input_path).lower().endswith(".gz") else open
+            with opener(input_path, "rt", encoding="utf-8", newline="") as input_handle:
+                while True:
+                    lines = [input_handle.readline() for _ in range(4)]
+                    if lines[0] == "":
+                        if any(lines[1:]):
+                            raise ValueError(f"Malformed FASTQ end-of-file: {input_path}")
+                        break
+                    if any(line == "" for line in lines[1:]):
+                        raise ValueError(f"Truncated FASTQ record: {input_path}")
+                    if not lines[0].startswith("@") or not lines[2].startswith("+"):
+                        raise ValueError(f"Malformed FASTQ record: {input_path}")
+                    if len(lines[1].rstrip("\r\n")) != len(lines[3].rstrip("\r\n")):
+                        raise ValueError(f"FASTQ sequence and quality lengths differ: {input_path}")
+                    output_handle.writelines(lines)
+                    read_count += 1
+    return read_count
 
 
 def _write_tsv(
@@ -1094,7 +1493,9 @@ def _publish_failed_attempt(*, source: Path, destination: Path) -> None:
 
 
 def _validate_kraken_database(*, database: Path) -> None:
-    missing = [name for name in ("hash.k2d", "opts.k2d", "taxo.k2d") if not (database / name).is_file()]
+    missing = [
+        name for name in ("hash.k2d", "opts.k2d", "taxo.k2d") if not (database / name).is_file()
+    ]
     if missing:
         raise ValueError(f"Kraken2 database is missing required files: {', '.join(missing)}")
 
@@ -1110,7 +1511,9 @@ def _validate_panel(*, panel: Path) -> None:
         header = handle.readline().rstrip("\n").split("\t")
     required = {"kmer", "k", "species_name"}
     if not required.issubset(header):
-        raise ValueError(f"KmerSutra panel lacks required columns: {sorted(required - set(header))}")
+        raise ValueError(
+            f"KmerSutra panel lacks required columns: {sorted(required - set(header))}"
+        )
 
 
 def _required_kmersutra_panel(*, workflow: WorkflowConfig) -> Path:
@@ -1118,6 +1521,23 @@ def _required_kmersutra_panel(*, workflow: WorkflowConfig) -> Path:
     if panel is None:
         raise ValueError("KmerSutra is enabled but no panel is configured")
     return panel
+
+
+def _required_host_reference(*, workflow: WorkflowConfig) -> Path:
+    """Return the host reference required for raw-read processing."""
+    reference = workflow.host_reference
+    if reference is None:
+        raise ValueError("Raw-read processing requires host.reference")
+    return reference
+
+
+def _resolved_minimap_index(*, workflow: WorkflowConfig) -> Path:
+    """Return a configured or workflow-built classification minimap2 index."""
+    return (
+        workflow.minimap_index
+        if workflow.minimap_index is not None
+        else workflow.output_directory / "00_preflight" / "classification_reference.mmi"
+    )
 
 
 def _validate_fastq_prefix(*, path: Path) -> None:
@@ -1160,6 +1580,8 @@ def _method_version(*, method: str) -> str:
         return _version(command=["kraken2", "--version"])
     if method == "metabuli":
         return _version(command=["metabuli", "version"])
+    if method == "minimap2":
+        return _version(command=["minimap2", "--version"])
     return _kmersutra_version()
 
 

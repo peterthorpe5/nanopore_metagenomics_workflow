@@ -50,6 +50,36 @@ def minimap2_host_command(
     ]
 
 
+def minimap2_classification_command(
+    *,
+    reference_index: Path,
+    input_fastq: Path,
+    threads: int,
+) -> list[str]:
+    """Build the controlled-reference ONT classification command.
+
+    Args:
+        reference_index: Minimap2 MMI index built from the classification FASTA.
+        input_fastq: Host-removed analysis reads.
+        threads: Worker threads.
+
+    Returns:
+        Command producing PAF with CIGAR tags on standard output.
+    """
+    _require_positive(threads=threads)
+    return [
+        "minimap2",
+        "-x",
+        "map-ont",
+        "--secondary=yes",
+        "-c",
+        "-t",
+        str(threads),
+        str(reference_index),
+        str(input_fastq),
+    ]
+
+
 def samtools_bam_command(*, output_bam: Path, threads: int) -> list[str]:
     """Build the SAM-to-BAM command used after host alignment."""
     _require_positive(threads=threads)
@@ -218,9 +248,11 @@ def required_executables(*, action: str) -> tuple[str, ...]:
     """Return external executables required for a workflow action."""
     mapping = {
         "build-host-index": ("minimap2",),
+        "accept-host-removed": ("rsync",),
         "host-deplete": ("minimap2", "samtools", "pigz", "rsync"),
         "classify-kraken2": ("kraken2", "pigz", "rsync"),
         "classify-metabuli": ("metabuli", "pigz", "rsync"),
+        "classify-minimap2": ("minimap2", "pigz", "rsync"),
         "classify-kmersutra": ("kmersutra-screen", "rsync"),
     }
     try:

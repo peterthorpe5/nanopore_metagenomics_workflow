@@ -33,14 +33,16 @@ mkdir -p "${RUN_DIR}/coverage_html"
 cd "${REPO_ROOT}"
 
 python -m ruff check src tests 2>&1 | tee "${RUN_DIR}/ruff.log"
+python -m ruff format --check src tests 2>&1 | tee "${RUN_DIR}/ruff_format.log"
 python -m coverage erase
 python -m coverage run -m unittest discover -s tests -p 'test_*.py' \
     2>&1 | tee "${RUN_DIR}/unittest.log"
 python -m coverage report 2>&1 | tee "${RUN_DIR}/coverage.txt"
 python -m coverage html -d "${RUN_DIR}/coverage_html"
 python -m compileall -q src tests
-bash -n scripts/run_workflow.sh
-bash -n scripts/run_quality_checks.sh
+while IFS= read -r script_path; do
+    bash -n "${script_path}"
+done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print | sort)
 GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ "${GIT_ROOT}" == "${REPO_ROOT}" ]]; then
     git diff --check 2>&1 | tee "${RUN_DIR}/git_diff_check.log"

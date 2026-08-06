@@ -76,6 +76,30 @@ class TestCliRouting(unittest.TestCase):
             (
                 [
                     "--action",
+                    "build-minimap-index",
+                    "--config",
+                    "c",
+                    "--output",
+                    "o",
+                    "--completion",
+                    "done",
+                ],
+                "nanopore_realdata.cli.build_minimap_index",
+            ),
+            (
+                [
+                    "--action",
+                    "accept-host-removed",
+                    "--config",
+                    "c",
+                    "--completion",
+                    "done",
+                ],
+                "nanopore_realdata.cli.accept_host_removed_batch",
+            ),
+            (
+                [
+                    "--action",
                     "host-deplete",
                     "--config",
                     "c",
@@ -176,7 +200,10 @@ class TestConfigurationEdges(unittest.TestCase):
             (lambda data: data["execution"].__setitem__("stage_resources", "yes"), "true or false"),
             (lambda data: data["resources"].__setitem__("host_threads", 0), "positive integer"),
             (lambda data: data["kraken2"].__setitem__("confidence", "zero"), "numeric"),
-            (lambda data: data["kmersutra"].__setitem__("call_preset", "unknown"), "must be one of"),
+            (
+                lambda data: data["kmersutra"].__setitem__("call_preset", "unknown"),
+                "must be one of",
+            ),
         ]
         for mutation, message in mutations:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary:
@@ -244,9 +271,12 @@ class TestConfigurationEdges(unittest.TestCase):
             for index, (text, message) in enumerate(cases):
                 path = root / f"samples_{index}.tsv"
                 path.write_text(text, encoding="utf-8")
-                with self.subTest(message=message), self.assertRaisesRegex(
-                    (ValueError, FileNotFoundError),
-                    message,
+                with (
+                    self.subTest(message=message),
+                    self.assertRaisesRegex(
+                        (ValueError, FileNotFoundError),
+                        message,
+                    ),
                 ):
                     load_samples(samples_path=path)
 
@@ -388,6 +418,17 @@ class TestWorkflowEdges(unittest.TestCase):
                     json.dumps({"status": "success"}),
                     encoding="utf-8",
                 )
+            minimap = workflow.output_directory / "02_classification" / "minimap2" / "sample_1"
+            minimap.mkdir(parents=True)
+            (minimap / "taxon_report.tsv").write_text(
+                "sample_id\tmethod\ttax_id\ttaxon_name\tbest_read_count\n"
+                "sample_1\tminimap2\t1\tSpecies alpha\t8\n",
+                encoding="utf-8",
+            )
+            (minimap / "complete.json").write_text(
+                json.dumps({"status": "success"}),
+                encoding="utf-8",
+            )
             kmer = workflow.output_directory / "02_classification" / "kmersutra" / "sample_1"
             kmer.mkdir(parents=True)
             (kmer / "species_detection_calls.tsv").write_text(

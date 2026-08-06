@@ -13,6 +13,7 @@ from nanopore_realdata.commands import (
     kmersutra_command,
     kraken2_command,
     metabuli_command,
+    minimap2_classification_command,
     minimap2_host_command,
     required_executables,
     samtools_count_command,
@@ -33,6 +34,23 @@ class TestConfiguration(unittest.TestCase):
         self.assertEqual(workflow.threads_kmersutra, 5)
         self.assertEqual(workflow.runtime_kmersutra_minutes, 40)
         self.assertEqual(workflow.kmersutra_failure_policy, "continue")
+        self.assertEqual(workflow.minimap_min_mapq, 15)
+        self.assertEqual(workflow.minimap_min_alignment, 500)
+
+    def test_host_removed_configuration_does_not_require_a_host_reference(self) -> None:
+        """Classification-ready reads must bypass host-reference requirements."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(
+                root=root,
+                input_read_state="host_removed",
+            )
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["host"] = {"reference": "", "index": ""}
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            workflow = load_workflow_config(config_path=config_path)
+        self.assertEqual(workflow.input_read_state, "host_removed")
+        self.assertIsNone(workflow.host_reference)
 
     def test_repeated_sample_rows_preserve_part_order(self) -> None:
         """Nanopore chunks for one sample should remain ordered."""
@@ -61,9 +79,7 @@ class TestConfiguration(unittest.TestCase):
             write_fastq(path=fastq)
             samples = root / "samples.tsv"
             samples.write_text(
-                "sample_id\tfastq\n"
-                f"sample_1\t{fastq}\n"
-                f"sample_2\t{fastq}\n",
+                f"sample_id\tfastq\nsample_1\t{fastq}\nsample_2\t{fastq}\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "listed more than once"):
@@ -88,11 +104,11 @@ class TestConfiguration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             config_path = build_test_project(root=Path(temporary))
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            config["schema_version"] = 2
+            config["schema_version"] = 1
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "schema_version"):
                 load_workflow_config(config_path=config_path)
-            config["schema_version"] = 1
+            config["schema_version"] = 2
             config["kraken2"]["confidence"] = 1.2
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "between"):
@@ -139,6 +155,23 @@ class TestCommands(unittest.TestCase):
         )
         self.assertIn("2304", count)
         self.assertIn("4", count)
+
+    def test_classification_minimap_command_retains_secondary_paf_hits(self) -> None:
+        """Controlled-reference mapping should preserve ties for ambiguity reporting."""
+        command = minimap2_classification_command(
+            reference_index=Path("classification.mmi"),
+            input_fastq=Path("reads.fastq.gz"),
+            threads=12,
+        )
+        self.assertIn("--secondary=yes", command)
+        self.assertIn("-c", command)
+        self.assertEqual(command[-2:], ["classification.mmi", "reads.fastq.gz"])
+        with self.assertRaisesRegex(ValueError, "Thread count"):
+            minimap2_classification_command(
+                reference_index=Path("classification.mmi"),
+                input_fastq=Path("reads.fastq.gz"),
+                threads=0,
+            )
 
     def test_kraken_command_detects_gzip_and_confidence(self) -> None:
         """Compressed ONT input and explicit confidence should reach Kraken2."""

@@ -12,7 +12,7 @@ from typing import Any, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SAMPLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FASTQ_SUFFIXES = (".fastq", ".fastq.gz", ".fq", ".fq.gz")
 
@@ -36,11 +36,14 @@ class WorkflowConfig:
     run_id: str
     output_directory: Path
     samples_path: Path
-    host_reference: Path
+    input_read_state: str
+    host_reference: Path | None
     host_index: Path | None
     kraken_database: Path
     metabuli_database: Path
     kmersutra_panel: Path | None
+    minimap_reference: Path
+    minimap_index: Path | None
     scratch_root: Path
     stage_resources: bool
     minimum_scratch_gb: int
@@ -49,18 +52,23 @@ class WorkflowConfig:
     threads_host: int
     threads_kraken2: int
     threads_metabuli: int
+    threads_minimap2: int
     threads_kmersutra: int
     memory_host_mb: int
     memory_kraken2_mb: int
     memory_metabuli_mb: int
+    memory_minimap2_mb: int
     memory_kmersutra_mb: int
     runtime_host_minutes: int
     runtime_kraken2_minutes: int
     runtime_metabuli_minutes: int
+    runtime_minimap2_minutes: int
     runtime_kmersutra_minutes: int
     kraken_confidence: float
     metabuli_min_score: float
     metabuli_max_ram_gb: int
+    minimap_min_mapq: int
+    minimap_min_alignment: int
     kmersutra_screen_preset: str
     kmersutra_call_preset: str
     kmersutra_same_genus_fraction: float
@@ -106,17 +114,35 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     kmersutra = _mapping(raw, "kmersutra")
     provenance = _mapping(raw, "provenance")
     kmersutra_enabled = _boolean(kmersutra, "enabled")
+    minimap2 = _mapping(raw, "minimap2")
 
     run_id = _identifier(run, "id")
     output_directory = _path(run, "output_directory", base=base, must_exist=False)
     samples_path = _path(inputs, "samples", base=base, must_exist=True)
-    host_reference = _path(host, "reference", base=base, must_exist=True)
+    input_read_state = _choice(
+        inputs,
+        "read_state",
+        choices={"raw", "host_removed"},
+    )
+    host_reference = _optional_path(host, "reference", base=base, must_exist=True)
     host_index = _optional_path(host, "index", base=base, must_exist=True)
     kraken_database = _path(databases, "kraken2", base=base, must_exist=True)
     metabuli_database = _path(databases, "metabuli", base=base, must_exist=True)
     kmersutra_panel = _optional_path(
         databases,
         "kmersutra_panel",
+        base=base,
+        must_exist=True,
+    )
+    minimap_reference = _path(
+        minimap2,
+        "reference",
+        base=base,
+        must_exist=True,
+    )
+    minimap_index = _optional_path(
+        minimap2,
+        "index",
         base=base,
         must_exist=True,
     )
@@ -130,10 +156,16 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         raise ValueError("kmersutra_panel is required when KmerSutra is enabled")
     if kmersutra_panel is not None and not kmersutra_panel.is_file():
         raise ValueError(f"KmerSutra panel must be a file: {kmersutra_panel}")
+    if input_read_state == "raw" and host_reference is None:
+        raise ValueError("host.reference is required when inputs.read_state is raw")
     if host_index is not None and not host_index.is_file():
         raise ValueError(f"Host minimap2 index must be a file: {host_index}")
-    if not host_reference.is_file():
+    if host_reference is not None and not host_reference.is_file():
         raise ValueError(f"Host reference must be a file: {host_reference}")
+    if not minimap_reference.is_file():
+        raise ValueError(f"Classification minimap2 reference must be a file: {minimap_reference}")
+    if minimap_index is not None and not minimap_index.is_file():
+        raise ValueError(f"Classification minimap2 index must be a file: {minimap_index}")
     if not scratch_root.is_dir():
         raise ValueError(f"Scratch root must be a directory: {scratch_root}")
 
@@ -143,11 +175,14 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         run_id=run_id,
         output_directory=output_directory,
         samples_path=samples_path,
+        input_read_state=input_read_state,
         host_reference=host_reference,
         host_index=host_index,
         kraken_database=kraken_database,
         metabuli_database=metabuli_database,
         kmersutra_panel=kmersutra_panel,
+        minimap_reference=minimap_reference,
+        minimap_index=minimap_index,
         scratch_root=scratch_root,
         stage_resources=_boolean(execution, "stage_resources"),
         minimum_scratch_gb=_positive_int(execution, "minimum_scratch_gb"),
@@ -159,14 +194,17 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         threads_host=_positive_int(resources, "host_threads"),
         threads_kraken2=_positive_int(resources, "kraken2_threads"),
         threads_metabuli=_positive_int(resources, "metabuli_threads"),
+        threads_minimap2=_positive_int(resources, "minimap2_threads"),
         threads_kmersutra=_positive_int(resources, "kmersutra_threads"),
         memory_host_mb=_positive_int(resources, "host_memory_mb"),
         memory_kraken2_mb=_positive_int(resources, "kraken2_memory_mb"),
         memory_metabuli_mb=_positive_int(resources, "metabuli_memory_mb"),
+        memory_minimap2_mb=_positive_int(resources, "minimap2_memory_mb"),
         memory_kmersutra_mb=_positive_int(resources, "kmersutra_memory_mb"),
         runtime_host_minutes=_positive_int(resources, "host_runtime_minutes"),
         runtime_kraken2_minutes=_positive_int(resources, "kraken2_runtime_minutes"),
         runtime_metabuli_minutes=_positive_int(resources, "metabuli_runtime_minutes"),
+        runtime_minimap2_minutes=_positive_int(resources, "minimap2_runtime_minutes"),
         runtime_kmersutra_minutes=_positive_int(resources, "kmersutra_runtime_minutes"),
         kraken_confidence=_bounded_float(kraken2, "confidence", minimum=0.0, maximum=1.0),
         metabuli_min_score=_bounded_float(
@@ -176,6 +214,8 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
             maximum=1.0,
         ),
         metabuli_max_ram_gb=_positive_int(metabuli, "max_ram_gb"),
+        minimap_min_mapq=_non_negative_int(minimap2, "min_mapq"),
+        minimap_min_alignment=_positive_int(minimap2, "min_alignment"),
         kmersutra_screen_preset=_choice(
             kmersutra,
             "screen_preset",
@@ -243,7 +283,9 @@ def load_samples(*, samples_path: Path) -> tuple[Sample, ...]:
             if not any(str(fastq_path).lower().endswith(suffix) for suffix in FASTQ_SUFFIXES):
                 raise ValueError(f"Unsupported FASTQ suffix on row {row_number}: {fastq_path}")
             if not fastq_path.is_file() or fastq_path.stat().st_size == 0:
-                raise FileNotFoundError(f"FASTQ is missing or empty on row {row_number}: {fastq_path}")
+                raise FileNotFoundError(
+                    f"FASTQ is missing or empty on row {row_number}: {fastq_path}"
+                )
             if fastq_path in seen_paths:
                 raise ValueError(f"FASTQ is listed more than once: {fastq_path}")
             seen_paths.add(fastq_path)
@@ -258,9 +300,7 @@ def load_samples(*, samples_path: Path) -> tuple[Sample, ...]:
                 for field, value in metadata.items():
                     current = grouped[sample_id][field]
                     if value and current and value != current:
-                        raise ValueError(
-                            f"Conflicting {field} values for sample {sample_id!r}"
-                        )
+                        raise ValueError(f"Conflicting {field} values for sample {sample_id!r}")
                     if value and not current:
                         grouped[sample_id][field] = value
             grouped[sample_id]["paths"].append(fastq_path)
@@ -282,11 +322,17 @@ def _validate_workflow_paths(*, workflow: WorkflowConfig) -> None:
     """Reject configurations that could overwrite source data or databases."""
     protected = {
         workflow.samples_path,
-        workflow.host_reference,
         workflow.kraken_database,
         workflow.metabuli_database,
+        workflow.minimap_reference,
         *(sample.fastq_paths for sample in workflow.samples),
     }
+    if workflow.host_reference is not None:
+        protected.add(workflow.host_reference)
+    if workflow.host_index is not None:
+        protected.add(workflow.host_index)
+    if workflow.minimap_index is not None:
+        protected.add(workflow.minimap_index)
     if workflow.kmersutra_panel is not None:
         protected.add(workflow.kmersutra_panel)
     flattened: set[Path] = set()
@@ -371,6 +417,14 @@ def _positive_int(mapping: Mapping[str, Any], key: str) -> int:
     value = mapping.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{key} must be a positive integer")
+    return value
+
+
+def _non_negative_int(mapping: Mapping[str, Any], key: str) -> int:
+    """Return a validated integer greater than or equal to zero."""
+    value = mapping.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
     return value
 
 

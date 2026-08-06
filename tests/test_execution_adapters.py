@@ -11,12 +11,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from helpers import build_test_project
+from helpers import build_test_project, write_fastq
 from nanopore_realdata.config import load_workflow_config
 from nanopore_realdata.workflow import (
     _classify_sample,
     _handle_per_read_output,
     _host_deplete_sample,
+    _merge_fastq_parts,
     _method_expected_outputs,
     _method_status,
     _method_task_settings,
@@ -26,7 +27,10 @@ from nanopore_realdata.workflow import (
     _run_kmersutra,
     _run_kraken2,
     _run_metabuli,
+    _run_minimap2,
+    accept_host_removed_batch,
     build_host_index,
+    build_minimap_index,
     classify_batch,
     host_deplete_batch,
 )
@@ -82,7 +86,52 @@ class TestStageAdapters(unittest.TestCase):
                 )
             self.assertEqual(output.read_text(encoding="utf-8"), "index")
             self.assertEqual(staged.call_count, 1)
-            self.assertEqual(json.loads(completion.read_text(encoding="utf-8"))["status"], "success")
+            self.assertEqual(
+                json.loads(completion.read_text(encoding="utf-8"))["status"], "success"
+            )
+
+    def test_build_classification_index_is_bound_to_minimap_reference(self) -> None:
+        """The cleaned classification FASTA should produce one restartable index."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root, stage_resources=True)
+            workflow = load_workflow_config(config_path=config_path)
+            output = root / "results" / "00_preflight" / "classification.mmi"
+            completion = output.with_suffix(".complete.json")
+
+            def fake_run(*, command, log_path, stdout_path=None, timeout_seconds=None):
+                del log_path, stdout_path, timeout_seconds
+                Path(command[command.index("-d") + 1]).write_text("index", encoding="utf-8")
+
+            def fake_publish(*, source, destination, log_path):
+                del log_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+
+            with (
+                patch("nanopore_realdata.workflow._require_tools"),
+                patch("nanopore_realdata.workflow.validate_scratch"),
+                patch(
+                    "nanopore_realdata.workflow.stage_resource",
+                    side_effect=lambda **kwargs: kwargs["source"],
+                ) as staged,
+                patch("nanopore_realdata.workflow.run_command", side_effect=fake_run),
+                patch("nanopore_realdata.workflow._publish_file", side_effect=fake_publish),
+            ):
+                build_minimap_index(
+                    config_path=config_path,
+                    output_index=output,
+                    output_completion=completion,
+                )
+                build_minimap_index(
+                    config_path=config_path,
+                    output_index=output,
+                    output_completion=completion,
+                )
+            payload = json.loads(completion.read_text(encoding="utf-8"))
+            self.assertEqual(payload["reference"], str(workflow.minimap_reference))
+            self.assertEqual(len(payload["reference_sha256"]), 64)
+            self.assertEqual(staged.call_count, 1)
 
     def test_host_batch_stages_index_and_fastq_once(self) -> None:
         """Host input data should be copied to scratch before mapping."""
@@ -115,7 +164,50 @@ class TestStageAdapters(unittest.TestCase):
             self.assertIn(host_index, observed)
             self.assertEqual(worker.call_count, 1)
             runtime_fastqs = worker.call_args.kwargs["runtime_fastqs"]
-            self.assertEqual(runtime_fastqs, (load_workflow_config(config_path=config_path).samples[0].fastq_paths[0],))
+            self.assertEqual(
+                runtime_fastqs,
+                (load_workflow_config(config_path=config_path).samples[0].fastq_paths[0],),
+            )
+
+    def test_host_removed_batch_validates_without_host_mapping(self) -> None:
+        """Pre-depleted inputs should be prepared without invoking minimap2 host removal."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(
+                root=root,
+                stage_resources=True,
+                input_read_state="host_removed",
+            )
+            completion = root / "results" / "01_host_depletion" / "stage.complete.json"
+            with (
+                patch("nanopore_realdata.workflow._require_tools"),
+                patch("nanopore_realdata.workflow.validate_scratch"),
+                patch(
+                    "nanopore_realdata.workflow.stage_resource",
+                    side_effect=lambda **kwargs: kwargs["source"],
+                ),
+                patch(
+                    "nanopore_realdata.workflow.publish_directory",
+                    side_effect=copy_publication,
+                ),
+                patch("nanopore_realdata.workflow._host_deplete_sample") as host_worker,
+            ):
+                accept_host_removed_batch(
+                    config_path=config_path,
+                    stage_completion=completion,
+                )
+            workflow = load_workflow_config(config_path=config_path)
+            summary = _read_single_tsv(
+                path=(
+                    workflow.output_directory
+                    / "01_host_depletion"
+                    / "sample_1"
+                    / "host_removal_summary.tsv"
+                )
+            )
+            self.assertEqual(summary["input_reads"], "1")
+            self.assertEqual(summary["host_depletion_performed"], "false")
+            self.assertFalse(host_worker.called)
 
     def test_classifier_batch_stages_database_and_completes(self) -> None:
         """Kraken2 should stage one database and dispatch each sample."""
@@ -127,7 +219,9 @@ class TestStageAdapters(unittest.TestCase):
             host.mkdir(parents=True)
             with gzip.open(host / "non_host.fastq.gz", "wt", encoding="utf-8") as handle:
                 handle.write("@read\nACGT\n+\nIIII\n")
-            completion = workflow.output_directory / "02_classification" / "kraken2" / "stage.complete.json"
+            completion = (
+                workflow.output_directory / "02_classification" / "kraken2" / "stage.complete.json"
+            )
             with (
                 patch("nanopore_realdata.workflow._require_tools"),
                 patch("nanopore_realdata.workflow.validate_scratch"),
@@ -142,9 +236,47 @@ class TestStageAdapters(unittest.TestCase):
                     method="kraken2",
                     stage_completion=completion,
                 )
-            self.assertEqual(json.loads(completion.read_text(encoding="utf-8"))["status"], "success")
+            self.assertEqual(
+                json.loads(completion.read_text(encoding="utf-8"))["status"], "success"
+            )
             self.assertEqual(staged.call_count, 1)
             self.assertEqual(worker.call_count, 1)
+
+    def test_minimap_batch_stages_index_and_matching_reference(self) -> None:
+        """Minimap2 should stage both the generated index and its source FASTA."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root, stage_resources=True)
+            workflow = load_workflow_config(config_path=config_path)
+            index = workflow.output_directory / "00_preflight" / "classification_reference.mmi"
+            index.parent.mkdir(parents=True)
+            index.write_text("index", encoding="utf-8")
+            completion = (
+                workflow.output_directory / "02_classification" / "minimap2" / "stage.complete.json"
+            )
+            observed: list[Path] = []
+
+            def fake_stage(*, source, destination_root, log_path):
+                del destination_root, log_path
+                observed.append(source)
+                return source
+
+            with (
+                patch("nanopore_realdata.workflow._require_tools"),
+                patch("nanopore_realdata.workflow.validate_scratch"),
+                patch("nanopore_realdata.workflow.stage_resource", side_effect=fake_stage),
+                patch("nanopore_realdata.workflow._classify_sample") as worker,
+            ):
+                classify_batch(
+                    config_path=config_path,
+                    method="minimap2",
+                    stage_completion=completion,
+                )
+            self.assertEqual(observed, [index, workflow.minimap_reference])
+            self.assertEqual(
+                worker.call_args.kwargs["signature_resources"],
+                (index, workflow.minimap_reference),
+            )
 
     def test_classifier_batch_rejects_unknown_method(self) -> None:
         """An undeclared classifier cannot enter the DAG adapter."""
@@ -245,7 +377,10 @@ class TestHostSampleAdapter(unittest.TestCase):
             pipeline.assert_not_called()
             with (
                 patch("nanopore_realdata.workflow.completion_is_valid", return_value=False),
-                patch("nanopore_realdata.workflow.run_pipeline", side_effect=RuntimeError("map failed")),
+                patch(
+                    "nanopore_realdata.workflow.run_pipeline",
+                    side_effect=RuntimeError("map failed"),
+                ),
                 patch("nanopore_realdata.workflow._publish_failed_attempt") as failed,
             ):
                 with self.assertRaisesRegex(RuntimeError, "map failed"):
@@ -264,7 +399,7 @@ class TestClassifierSampleAdapter(unittest.TestCase):
     """Exercise per-sample dispatch, completion and failure paths."""
 
     def test_each_classifier_branch_publishes_expected_outputs(self) -> None:
-        """Kraken2, Metabuli and KmerSutra should share restart semantics."""
+        """All four classifiers should share restart semantics."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_path = build_test_project(root=root)
@@ -275,7 +410,7 @@ class TestClassifierSampleAdapter(unittest.TestCase):
             with gzip.open(host / "non_host.fastq.gz", "wt", encoding="utf-8") as handle:
                 handle.write("@read\nACGT\n+\nIIII\n")
 
-            for method in ("kraken2", "metabuli", "kmersutra"):
+            for method in ("kraken2", "metabuli", "minimap2", "kmersutra"):
                 with self.subTest(method=method):
                     workspace = root / f"workspace_{method}"
                     workspace.mkdir()
@@ -294,6 +429,19 @@ class TestClassifierSampleAdapter(unittest.TestCase):
                                 else "metabuli_classifications.tsv.gz"
                             )
                             directory.joinpath(name).write_text("assignments", encoding="utf-8")
+                        elif method == "minimap2":
+                            directory.joinpath("taxon_report.tsv").write_text(
+                                "sample_id\tmethod\ttax_id\n",
+                                encoding="utf-8",
+                            )
+                            directory.joinpath("mapping_summary.tsv").write_text(
+                                "sample_id\tmapped_read_count\nsample_1\t0\n",
+                                encoding="utf-8",
+                            )
+                            directory.joinpath("alignments.paf.gz").write_text(
+                                "paf",
+                                encoding="utf-8",
+                            )
                         else:
                             for name in (
                                 "species_detection_calls.tsv",
@@ -304,20 +452,31 @@ class TestClassifierSampleAdapter(unittest.TestCase):
 
                     target = f"nanopore_realdata.workflow._run_{method}"
                     with (
-                        patch("nanopore_realdata.workflow.stage_resource", return_value=host / "non_host.fastq.gz"),
+                        patch(
+                            "nanopore_realdata.workflow.stage_resource",
+                            return_value=host / "non_host.fastq.gz",
+                        ),
                         patch(target, side_effect=fake_tool),
                         patch("nanopore_realdata.workflow._method_version", return_value="test"),
-                        patch("nanopore_realdata.workflow.publish_directory", side_effect=copy_publication),
+                        patch(
+                            "nanopore_realdata.workflow.publish_directory",
+                            side_effect=copy_publication,
+                        ),
                     ):
                         _classify_sample(
                             workflow=workflow,
                             sample=sample,
                             method=method,
                             resource=Path("resource"),
-                            signature_resource=workflow.kmersutra_panel,
+                            signature_resources=(workflow.kmersutra_panel,),
+                            reference_fasta=(
+                                workflow.minimap_reference if method == "minimap2" else None
+                            ),
                             workspace=workspace,
                         )
-                    final = workflow.output_directory / "02_classification" / method / sample.sample_id
+                    final = (
+                        workflow.output_directory / "02_classification" / method / sample.sample_id
+                    )
                     self.assertTrue((final / "complete.json").is_file())
 
     def test_classifier_sample_rejects_missing_input_skips_and_retains_failure(self) -> None:
@@ -335,7 +494,8 @@ class TestClassifierSampleAdapter(unittest.TestCase):
                     sample=sample,
                     method="kraken2",
                     resource=workflow.kraken_database,
-                    signature_resource=workflow.kraken_database,
+                    signature_resources=(workflow.kraken_database,),
+                    reference_fasta=None,
                     workspace=workspace,
                 )
             host = workflow.output_directory / "01_host_depletion" / sample.sample_id
@@ -350,14 +510,20 @@ class TestClassifierSampleAdapter(unittest.TestCase):
                     sample=sample,
                     method="kraken2",
                     resource=workflow.kraken_database,
-                    signature_resource=workflow.kraken_database,
+                    signature_resources=(workflow.kraken_database,),
+                    reference_fasta=None,
                     workspace=workspace,
                 )
             stage.assert_not_called()
             with (
                 patch("nanopore_realdata.workflow.completion_is_valid", return_value=False),
-                patch("nanopore_realdata.workflow.stage_resource", return_value=host / "non_host.fastq.gz"),
-                patch("nanopore_realdata.workflow._run_kraken2", side_effect=RuntimeError("failed")),
+                patch(
+                    "nanopore_realdata.workflow.stage_resource",
+                    return_value=host / "non_host.fastq.gz",
+                ),
+                patch(
+                    "nanopore_realdata.workflow._run_kraken2", side_effect=RuntimeError("failed")
+                ),
                 patch("nanopore_realdata.workflow._publish_failed_attempt") as failed,
             ):
                 with self.assertRaisesRegex(RuntimeError, "failed"):
@@ -366,7 +532,8 @@ class TestClassifierSampleAdapter(unittest.TestCase):
                         sample=sample,
                         method="kraken2",
                         resource=workflow.kraken_database,
-                        signature_resource=workflow.kraken_database,
+                        signature_resources=(workflow.kraken_database,),
+                        reference_fasta=None,
                         workspace=workspace,
                     )
             failed.assert_called_once()
@@ -387,7 +554,7 @@ class TestToolAdaptersAndHelpers(unittest.TestCase):
 
     def test_kraken_metabuli_and_kmersutra_output_contracts(self) -> None:
         """Each adapter should accept expected outputs and reject absent reports."""
-        for method in ("kraken2", "metabuli", "kmersutra"):
+        for method in ("kraken2", "metabuli", "minimap2", "kmersutra"):
             with self.subTest(method=method):
                 output = self.root / f"tool_{method}"
                 output.mkdir()
@@ -398,14 +565,18 @@ class TestToolAdaptersAndHelpers(unittest.TestCase):
                         (output / "classifications.tsv").write_text("raw", encoding="utf-8")
                         (output / "report.tsv").write_text("report", encoding="utf-8")
                     elif method == "metabuli":
-                        (output / "metabuli_classifications.tsv").write_text("raw", encoding="utf-8")
+                        (output / "metabuli_classifications.tsv").write_text(
+                            "raw", encoding="utf-8"
+                        )
                         (output / "metabuli_report.tsv").write_text("report", encoding="utf-8")
                     else:
                         self.assertEqual(
                             timeout_seconds,
                             self.workflow.kmersutra_timeout_minutes * 60,
                         )
-                        (output / "species_detection_calls.tsv").write_text("calls", encoding="utf-8")
+                        (output / "species_detection_calls.tsv").write_text(
+                            "calls", encoding="utf-8"
+                        )
 
                 with (
                     patch("nanopore_realdata.workflow.run_command", side_effect=fake_run),
@@ -439,6 +610,55 @@ class TestToolAdaptersAndHelpers(unittest.TestCase):
                             output_directory=output,
                             log_path=output / "log",
                         )
+
+    def test_minimap_adapter_writes_paf_and_taxon_summaries(self) -> None:
+        """Controlled-reference mapping should retain auditable alignment evidence."""
+        output = self.root / "tool_minimap2"
+        output.mkdir()
+        target = "kraken:taxid|1|reference_a"
+
+        def fake_pipeline(*, commands, log_path, stdout_path=None):
+            del commands, log_path
+            assert stdout_path is not None
+            with gzip.open(stdout_path, "wt", encoding="utf-8") as handle:
+                handle.write(f"read_1\t1000\t0\t900\t+\t{target}\t2000\t0\t900\t850\t900\t60\n")
+
+        with patch("nanopore_realdata.workflow.run_pipeline", side_effect=fake_pipeline):
+            _run_minimap2(
+                workflow=self.workflow,
+                sample=self.sample,
+                input_fastq=Path("input.fastq.gz"),
+                reference_index=Path("classification.mmi"),
+                reference_fasta=self.workflow.minimap_reference,
+                output_directory=output,
+                log_path=output / "log",
+            )
+        self.assertTrue((output / "alignments.paf.gz").is_file())
+        self.assertIn("Species alpha", (output / "taxon_report.tsv").read_text(encoding="utf-8"))
+        self.assertIn(
+            "mapped_read_count", (output / "mapping_summary.tsv").read_text(encoding="utf-8")
+        )
+
+    def test_fastq_merge_validates_all_parts(self) -> None:
+        """Host-removed chunks should merge in order and reject truncation."""
+        first = self.root / "first.fastq"
+        second = self.root / "second.fastq.gz"
+        write_fastq(path=first, read_id="first")
+        write_fastq(path=second, read_id="second")
+        output = self.root / "merged.fastq.gz"
+        self.assertEqual(
+            _merge_fastq_parts(input_paths=(first, second), output_path=output),
+            2,
+        )
+        with gzip.open(output, "rt", encoding="utf-8") as handle:
+            merged = handle.read()
+        self.assertLess(merged.index("@first"), merged.index("@second"))
+        broken = self.root / "broken.fastq"
+        broken.write_text("@read\nACGT\n+\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Truncated"):
+            _merge_fastq_parts(input_paths=(broken,), output_path=output)
+        with self.assertRaisesRegex(ValueError, "At least one"):
+            _merge_fastq_parts(input_paths=(), output_path=output)
 
     def test_tool_adapters_reject_missing_declared_output(self) -> None:
         """Successful exit status alone is not sufficient evidence of success."""

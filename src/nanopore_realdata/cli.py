@@ -9,8 +9,10 @@ from typing import Sequence
 
 from nanopore_realdata.config import load_workflow_config
 from nanopore_realdata.workflow import (
+    accept_host_removed_batch,
     aggregate_results,
     build_host_index,
+    build_minimap_index,
     classify_batch,
     host_deplete_batch,
     preflight,
@@ -22,6 +24,8 @@ ACTIONS = (
     "validate",
     "preflight",
     "build-host-index",
+    "build-minimap-index",
+    "accept-host-removed",
     "host-deplete",
     "classify",
     "aggregate",
@@ -42,7 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--completion", type=Path)
     parser.add_argument("--host-index", type=Path)
-    parser.add_argument("--method", choices=("kraken2", "metabuli", "kmersutra"))
+    parser.add_argument(
+        "--method",
+        choices=("kraken2", "metabuli", "minimap2", "kmersutra"),
+    )
     parser.add_argument("--sample-id")
     parser.add_argument("--snakefile", type=Path)
     parser.add_argument("--profile", type=Path)
@@ -102,6 +109,27 @@ def main(arguments: Sequence[str] | None = None) -> int:
             ),
         )
         return 0
+    if args.action == "build-minimap-index":
+        build_minimap_index(
+            config_path=args.config,
+            output_index=_required_path(parser=parser, value=args.output, option="--output"),
+            output_completion=_required_path(
+                parser=parser,
+                value=args.completion,
+                option="--completion",
+            ),
+        )
+        return 0
+    if args.action == "accept-host-removed":
+        accept_host_removed_batch(
+            config_path=args.config,
+            stage_completion=_required_path(
+                parser=parser,
+                value=args.completion,
+                option="--completion",
+            ),
+        )
+        return 0
     if args.action == "host-deplete":
         host_deplete_batch(
             config_path=args.config,
@@ -115,7 +143,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 value=args.completion,
                 option="--completion",
             ),
-            sample_id=args.sample_id,
         )
         return 0
     if args.action == "classify":
@@ -129,6 +156,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 value=args.completion,
                 option="--completion",
             ),
+            sample_id=args.sample_id,
         )
         return 0
     if args.action == "aggregate":

@@ -25,6 +25,7 @@ def build_test_project(
     kmersutra_enabled: bool = True,
     failure_policy: str = "continue",
     stage_resources: bool = False,
+    input_read_state: str = "raw",
 ) -> Path:
     """Create a minimal valid project and return its YAML path."""
     root.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,11 @@ def build_test_project(
     )
     host_reference = root / "host.fasta"
     host_reference.write_text(">host\nACGTACGT\n", encoding="utf-8")
+    minimap_reference = root / "classification.fasta"
+    minimap_reference.write_text(
+        ">kraken:taxid|1|reference_a Species alpha\nACGTACGT\n",
+        encoding="utf-8",
+    )
     kraken = root / "kraken"
     kraken.mkdir()
     for name in ("hash.k2d", "opts.k2d", "taxo.k2d"):
@@ -49,17 +55,23 @@ def build_test_project(
     with gzip.open(panel, "wt", encoding="utf-8") as handle:
         handle.write("kmer\tk\tspecies_name\nAAAA\t51\tSpecies alpha\n")
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run": {
             "id": "test_run",
             "output_directory": str(root / "results"),
         },
-        "inputs": {"samples": str(samples)},
+        "inputs": {"samples": str(samples), "read_state": input_read_state},
         "host": {"reference": str(host_reference), "index": ""},
         "databases": {
             "kraken2": str(kraken),
             "metabuli": str(metabuli),
             "kmersutra_panel": str(panel),
+        },
+        "minimap2": {
+            "reference": str(minimap_reference),
+            "index": "",
+            "min_mapq": 15,
+            "min_alignment": 500,
         },
         "execution": {
             "scratch_root": str(root),
@@ -72,14 +84,17 @@ def build_test_project(
             "host_threads": 2,
             "kraken2_threads": 3,
             "metabuli_threads": 4,
+            "minimap2_threads": 4,
             "kmersutra_threads": 5,
             "host_memory_mb": 1000,
             "kraken2_memory_mb": 2000,
             "metabuli_memory_mb": 3000,
+            "minimap2_memory_mb": 3000,
             "kmersutra_memory_mb": 4000,
             "host_runtime_minutes": 10,
             "kraken2_runtime_minutes": 20,
             "metabuli_runtime_minutes": 30,
+            "minimap2_runtime_minutes": 30,
             "kmersutra_runtime_minutes": 40,
         },
         "kraken2": {"confidence": 0.0},

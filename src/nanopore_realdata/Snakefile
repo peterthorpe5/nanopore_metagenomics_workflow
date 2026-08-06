@@ -4,8 +4,10 @@ from pathlib import Path
 
 from nanopore_realdata.config import load_workflow_config
 from nanopore_realdata.workflow import (
+    accept_host_removed_batch,
     aggregate_results,
     build_host_index,
+    build_minimap_index,
     classify_batch,
     host_deplete_batch,
     preflight,
@@ -20,6 +22,13 @@ SAMPLE_IDS = [sample.sample_id for sample in WORKFLOW.samples]
 PREFLIGHT = OUTPUT_ROOT / "00_preflight" / "preflight.json"
 HOST_INDEX = WORKFLOW.host_index or OUTPUT_ROOT / "00_preflight" / "host_reference.mmi"
 HOST_INDEX_COMPLETION = OUTPUT_ROOT / "00_preflight" / "host_index.complete.json"
+MINIMAP_INDEX = (
+    WORKFLOW.minimap_index
+    or OUTPUT_ROOT / "00_preflight" / "classification_reference.mmi"
+)
+MINIMAP_INDEX_COMPLETION = (
+    OUTPUT_ROOT / "00_preflight" / "classification_reference_index.complete.json"
+)
 HOST_FASTQS = [
     OUTPUT_ROOT / "01_host_depletion" / sample_id / "non_host.fastq.gz"
     for sample_id in SAMPLE_IDS
@@ -38,8 +47,13 @@ METABULI_REPORTS = [
     OUTPUT_ROOT / "02_classification" / "metabuli" / sample_id / "report.tsv"
     for sample_id in SAMPLE_IDS
 ]
+MINIMAP_REPORTS = [
+    OUTPUT_ROOT / "02_classification" / "minimap2" / sample_id / "taxon_report.tsv"
+    for sample_id in SAMPLE_IDS
+]
 KRAKEN_STAGE = OUTPUT_ROOT / "02_classification" / "kraken2" / "stage.complete.json"
 METABULI_STAGE = OUTPUT_ROOT / "02_classification" / "metabuli" / "stage.complete.json"
+MINIMAP_STAGE = OUTPUT_ROOT / "02_classification" / "minimap2" / "stage.complete.json"
 KMERSUTRA_STAGES = [
     OUTPUT_ROOT
     / "02_classification"
@@ -54,6 +68,7 @@ FINAL_COMPLETION = FINAL_ROOT / "workflow.complete.json"
 FINAL_OUTPUTS = [
     FINAL_ROOT / "sample_summary.tsv",
     FINAL_ROOT / "classifier_taxon_reports.tsv.gz",
+    FINAL_ROOT / "minimap2_taxon_reports.tsv.gz",
     FINAL_ROOT / "kmersutra_species_calls.tsv.gz",
     FINAL_ROOT / "README.txt",
     FINAL_ROOT / "SHA256SUMS.tsv",
@@ -70,7 +85,17 @@ rule preflight:
     input:
         config=str(CONFIG_PATH),
         samples=str(WORKFLOW.samples_path),
-        host_reference=str(WORKFLOW.host_reference),
+        host_reference=(
+            [str(WORKFLOW.host_reference)]
+            if WORKFLOW.host_reference is not None
+            else []
+        ),
+        minimap_reference=str(WORKFLOW.minimap_reference),
+        minimap_index=(
+            [str(WORKFLOW.minimap_index)]
+            if WORKFLOW.minimap_index is not None
+            else []
+        ),
         fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
     output:
         str(PREFLIGHT)
@@ -81,7 +106,7 @@ rule preflight:
         preflight(config_path=Path(input.config), output_path=Path(output[0]))
 
 
-if WORKFLOW.host_index is None:
+if WORKFLOW.input_read_state == "raw" and WORKFLOW.host_index is None:
     rule build_host_index:
         input:
             config=str(CONFIG_PATH),
@@ -103,31 +128,78 @@ if WORKFLOW.host_index is None:
             )
 
 
-rule host_depletion:
-    input:
-        config=str(CONFIG_PATH),
-        preflight=str(PREFLIGHT),
-        host_index=str(HOST_INDEX),
-        fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
-    output:
-        fastqs=(
-            [str(path) for path in HOST_FASTQS]
-            if WORKFLOW.keep_non_host_fastq
-            else temp([str(path) for path in HOST_FASTQS])
-        ),
-        summaries=[str(path) for path in HOST_SUMMARIES],
-        stage=str(HOST_STAGE),
-    threads: WORKFLOW.threads_host
-    resources:
-        mem_mb=WORKFLOW.memory_host_mb,
-        runtime=WORKFLOW.runtime_host_minutes,
-        database_stage=1,
-    run:
-        host_deplete_batch(
-            config_path=Path(input.config),
-            host_index=Path(input.host_index),
-            stage_completion=Path(output.stage),
-        )
+if WORKFLOW.input_read_state == "raw":
+    rule host_depletion:
+        input:
+            config=str(CONFIG_PATH),
+            preflight=str(PREFLIGHT),
+            host_index=str(HOST_INDEX),
+            fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
+        output:
+            fastqs=(
+                [str(path) for path in HOST_FASTQS]
+                if WORKFLOW.keep_non_host_fastq
+                else temp([str(path) for path in HOST_FASTQS])
+            ),
+            summaries=[str(path) for path in HOST_SUMMARIES],
+            stage=str(HOST_STAGE),
+        threads: WORKFLOW.threads_host
+        resources:
+            mem_mb=WORKFLOW.memory_host_mb,
+            runtime=WORKFLOW.runtime_host_minutes,
+            database_stage=1,
+        run:
+            host_deplete_batch(
+                config_path=Path(input.config),
+                host_index=Path(input.host_index),
+                stage_completion=Path(output.stage),
+            )
+else:
+    rule accept_host_removed:
+        input:
+            config=str(CONFIG_PATH),
+            preflight=str(PREFLIGHT),
+            fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
+        output:
+            fastqs=(
+                [str(path) for path in HOST_FASTQS]
+                if WORKFLOW.keep_non_host_fastq
+                else temp([str(path) for path in HOST_FASTQS])
+            ),
+            summaries=[str(path) for path in HOST_SUMMARIES],
+            stage=str(HOST_STAGE),
+        threads: 1
+        resources:
+            mem_mb=4096,
+            runtime=WORKFLOW.runtime_host_minutes,
+            database_stage=1,
+        run:
+            accept_host_removed_batch(
+                config_path=Path(input.config),
+                stage_completion=Path(output.stage),
+            )
+
+
+if WORKFLOW.minimap_index is None:
+    rule build_minimap_index:
+        input:
+            config=str(CONFIG_PATH),
+            preflight=str(PREFLIGHT),
+            reference=str(WORKFLOW.minimap_reference),
+        output:
+            index=str(MINIMAP_INDEX),
+            completion=str(MINIMAP_INDEX_COMPLETION),
+        threads: WORKFLOW.threads_minimap2
+        resources:
+            mem_mb=WORKFLOW.memory_minimap2_mb,
+            runtime=WORKFLOW.runtime_minimap2_minutes,
+            database_stage=1,
+        run:
+            build_minimap_index(
+                config_path=Path(input.config),
+                output_index=Path(output.index),
+                output_completion=Path(output.completion),
+            )
 
 
 rule classify_kraken2:
@@ -172,11 +244,35 @@ rule classify_metabuli:
         )
 
 
+rule classify_minimap2:
+    input:
+        config=str(CONFIG_PATH),
+        host_stage=str(HOST_STAGE),
+        index=str(MINIMAP_INDEX),
+        reference=str(WORKFLOW.minimap_reference),
+        fastqs=[str(path) for path in HOST_FASTQS],
+    output:
+        reports=[str(path) for path in MINIMAP_REPORTS],
+        stage=str(MINIMAP_STAGE),
+    threads: WORKFLOW.threads_minimap2
+    resources:
+        mem_mb=WORKFLOW.memory_minimap2_mb,
+        runtime=WORKFLOW.runtime_minimap2_minutes,
+        database_stage=1,
+    run:
+        classify_batch(
+            config_path=Path(input.config),
+            method="minimap2",
+            stage_completion=Path(output.stage),
+        )
+
+
 rule classify_kmersutra:
     input:
         config=str(CONFIG_PATH),
         kraken_stage=str(KRAKEN_STAGE),
         metabuli_stage=str(METABULI_STAGE),
+        minimap_stage=str(MINIMAP_STAGE),
         fastq=str(OUTPUT_ROOT / "01_host_depletion" / "{sample_id}" / "non_host.fastq.gz"),
     output:
         stage=str(
@@ -206,16 +302,19 @@ rule aggregate:
         host_summaries=[str(path) for path in HOST_SUMMARIES],
         kraken_reports=[str(path) for path in KRAKEN_REPORTS],
         metabuli_reports=[str(path) for path in METABULI_REPORTS],
+        minimap_reports=[str(path) for path in MINIMAP_REPORTS],
         kraken_stage=str(KRAKEN_STAGE),
         metabuli_stage=str(METABULI_STAGE),
+        minimap_stage=str(MINIMAP_STAGE),
         kmersutra_stages=[str(path) for path in KMERSUTRA_STAGES],
     output:
         summary=str(FINAL_OUTPUTS[0]),
         taxon_reports=str(FINAL_OUTPUTS[1]),
-        kmersutra_calls=str(FINAL_OUTPUTS[2]),
-        readme=str(FINAL_OUTPUTS[3]),
-        checksums=str(FINAL_OUTPUTS[4]),
-        completion=str(FINAL_OUTPUTS[5]),
+        minimap_reports=str(FINAL_OUTPUTS[2]),
+        kmersutra_calls=str(FINAL_OUTPUTS[3]),
+        readme=str(FINAL_OUTPUTS[4]),
+        checksums=str(FINAL_OUTPUTS[5]),
+        completion=str(FINAL_OUTPUTS[6]),
     resources:
         mem_mb=4096,
         runtime=60,

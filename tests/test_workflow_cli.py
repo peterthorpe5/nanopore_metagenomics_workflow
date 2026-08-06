@@ -82,12 +82,7 @@ class TestPreflightAndAggregation(unittest.TestCase):
                 encoding="utf-8",
             )
             for method in ("kraken2", "metabuli"):
-                directory = (
-                    workflow.output_directory
-                    / "02_classification"
-                    / method
-                    / "sample_1"
-                )
+                directory = workflow.output_directory / "02_classification" / method / "sample_1"
                 directory.mkdir(parents=True)
                 (directory / "report.tsv").write_text(
                     "100.00\t40\t40\tS\t123\tSpecies alpha\n",
@@ -97,12 +92,18 @@ class TestPreflightAndAggregation(unittest.TestCase):
                     json.dumps({"status": "success"}),
                     encoding="utf-8",
                 )
-            kmersutra = (
-                workflow.output_directory
-                / "02_classification"
-                / "kmersutra"
-                / "sample_1"
+            minimap = workflow.output_directory / "02_classification" / "minimap2" / "sample_1"
+            minimap.mkdir(parents=True)
+            (minimap / "taxon_report.tsv").write_text(
+                "sample_id\tmethod\ttax_id\ttaxon_name\tbest_read_count\n"
+                "sample_1\tminimap2\t123\tSpecies alpha\t4\n",
+                encoding="utf-8",
             )
+            (minimap / "complete.json").write_text(
+                json.dumps({"status": "success"}),
+                encoding="utf-8",
+            )
+            kmersutra = workflow.output_directory / "02_classification" / "kmersutra" / "sample_1"
             kmersutra.mkdir(parents=True)
             (kmersutra / "failure.json").write_text(
                 json.dumps({"status": "failed"}),
@@ -119,9 +120,7 @@ class TestPreflightAndAggregation(unittest.TestCase):
                 encoding="utf-8",
             ) as handle:
                 calls = handle.read()
-            completion_status = json.loads(
-                completion.read_text(encoding="utf-8")
-            )["status"]
+            completion_status = json.loads(completion.read_text(encoding="utf-8"))["status"]
         self.assertIn("failed", sample_summary)
         self.assertIn("workflow_status", calls)
         self.assertIn("failed", calls)
@@ -212,9 +211,7 @@ class TestCliAndSnakemake(unittest.TestCase):
 
     def test_parser_requires_named_action_and_config(self) -> None:
         """The public interface should not require positional arguments."""
-        args = build_parser().parse_args(
-            ["--action", "validate", "--config", "config.yaml"]
-        )
+        args = build_parser().parse_args(["--action", "validate", "--config", "config.yaml"])
         self.assertEqual(args.action, "validate")
         self.assertEqual(args.cores, "all")
 
@@ -274,7 +271,9 @@ class TestCliAndSnakemake(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_path = build_test_project(root=root, kmersutra_enabled=False)
-            snakefile = Path(__file__).resolve().parents[1] / "src" / "nanopore_realdata" / "Snakefile"
+            snakefile = (
+                Path(__file__).resolve().parents[1] / "src" / "nanopore_realdata" / "Snakefile"
+            )
             command = [
                 str(snakemake),
                 "--snakefile",
