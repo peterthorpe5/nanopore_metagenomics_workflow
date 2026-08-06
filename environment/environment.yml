@@ -15,4 +15,3 @@ dependencies:
   - snakemake-minimal>=9,<10
   - pip:
       - snakemake-executor-plugin-slurm>=1.9,<2
-      - -e .[test]
