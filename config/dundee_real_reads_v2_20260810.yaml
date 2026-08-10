@@ -5,8 +5,8 @@ run:
   output_directory: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/runs/real_reads_classifier_benchmark_v2_20260810
 
 deployment:
-  expected_repository_root: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/nanopore_metagenomics_workflow_v0_4_0
-  expected_package_version: 0.4.0
+  expected_repository_root: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/nanopore_metagenomics_workflow
+  expected_package_version: 0.4.1
   conda_environment: nanopore_realdata_workflow
 
 inputs:
@@ -26,6 +26,9 @@ databases:
 minimap2:
   genome_config: ""
   reference: /home/pthorpe001/data/project_back_up_2024/Janet_genome_databases/genome_to_use/plas_outgrps_genomes_Hard_MASKED.fasta
+  required_species:
+    - Plasmodium inui
+    - Plasmodium cynomolgi
   index: ""
   min_mapq: 15
   min_alignment: 500

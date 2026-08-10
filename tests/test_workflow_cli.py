@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 from helpers import build_test_project
 from nanopore_realdata.cli import build_parser, main
 from nanopore_realdata.config import load_workflow_config
@@ -54,6 +56,41 @@ class TestPreflightAndAggregation(unittest.TestCase):
             path.write_text("@read\nACGT\n+\nIII\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "lengths differ"):
                 _validate_fastq_prefix(path=path)
+
+    def test_preflight_allows_classification_without_pcr_truth(self) -> None:
+        """Ordinary real samples should preflight without benchmark metadata."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(
+                root=root,
+                pcr_truth_enabled=False,
+            )
+            output = root / "preflight" / "preflight.json"
+            with (
+                patch("nanopore_realdata.workflow._require_tools"),
+                patch("nanopore_realdata.workflow._version", return_value="test-version"),
+            ):
+                preflight(config_path=config_path, output_path=output)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            truth_table = (output.parent / "resolved_pcr_truth.tsv").read_text(encoding="utf-8")
+        self.assertFalse(payload["pcr_evaluation_configured"])
+        self.assertEqual(payload["primary_pcr_sample_count"], 0)
+        self.assertEqual(payload["resources"]["pcr_truth"], "not_configured")
+        self.assertEqual(len(truth_table.splitlines()), 1)
+
+    def test_preflight_requires_explicit_reference_species_for_pcr_benchmark(self) -> None:
+        """PCR species must never enter the minimap2 contract implicitly."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root)
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["minimap2"]["required_species"] = []
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "required_species"):
+                preflight(
+                    config_path=config_path,
+                    output_path=root / "preflight" / "preflight.json",
+                )
 
     def test_report_parser_normalises_kraken_style_rows(self) -> None:
         """Kraken2 and Metabuli report rows share one stable TSV schema."""
@@ -129,6 +166,28 @@ class TestPreflightAndAggregation(unittest.TestCase):
         self.assertIn("kmersutra\tfailed", classifier_status)
         self.assertEqual(completion_status, "partial")
 
+    def test_aggregate_without_pcr_truth_retains_classifier_reporting(self) -> None:
+        """PCR-free samples should receive complete classifier-only outputs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(
+                root=root,
+                pcr_truth_enabled=False,
+            )
+            workflow = load_workflow_config(config_path=config_path)
+            completion = workflow.output_directory / "03_final" / "workflow.complete.json"
+            aggregate_results(config_path=config_path, completion_path=completion)
+            payload = json.loads(completion.read_text(encoding="utf-8"))
+            summary = (completion.parent / "sample_summary.tsv").read_text(encoding="utf-8")
+            pcr_html = (completion.parent / "reports" / "pcr_comparison.html").read_text(
+                encoding="utf-8"
+            )
+            truth_table = (completion.parent / "pcr_truth.tsv").read_text(encoding="utf-8")
+        self.assertFalse(payload["pcr_evaluation_configured"])
+        self.assertIn("not_configured", summary)
+        self.assertIn("PCR evaluation was not configured", pcr_html)
+        self.assertEqual(len(truth_table.splitlines()), 1)
+
 
 class TestKmerSutraFailurePolicy(unittest.TestCase):
     """Protect the explicitly non-blocking KmerSutra branch."""
@@ -137,7 +196,11 @@ class TestKmerSutraFailurePolicy(unittest.TestCase):
         """Disabling KmerSutra should require no executable or scratch staging."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            config_path = build_test_project(root=root, kmersutra_enabled=False)
+            config_path = build_test_project(
+                root=root,
+                kmersutra_enabled=False,
+                pcr_truth_enabled=False,
+            )
             stage = root / "results" / "02_classification" / "kmersutra" / "stage.complete.json"
             classify_batch(
                 config_path=config_path,

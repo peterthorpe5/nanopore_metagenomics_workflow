@@ -365,6 +365,22 @@ def _render_pcr_report(
     method_summary_rows: Sequence[Mapping[str, Any]],
 ) -> str:
     """Render independent PCR concordance without forcing classifier consensus."""
+    if workflow.pcr_truth_path is None:
+        body = _hero(
+            eyebrow="Optional independent reference",
+            title="PCR evaluation was not configured",
+            subtitle=(
+                "This classification run has no PCR truth table. Classifier results remain "
+                "available in the method and comparison reports, without an accuracy claim."
+            ),
+        )
+        return _document(
+            title=f"{workflow.run_id} · PCR not configured",
+            body=body,
+            prefix="",
+            active="pcr",
+            footer_note="Optional independent PCR evaluation not configured",
+        )
     primary_samples = {
         str(row.get("sample_id", ""))
         for row in concordance_rows

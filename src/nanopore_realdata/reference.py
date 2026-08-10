@@ -175,11 +175,11 @@ def validate_required_species(
     sources: Sequence[GenomeSource],
     required_species: Sequence[str],
 ) -> None:
-    """Require every PCR-expected species in the controlled source panel.
+    """Require every configured species in the controlled source panel.
 
     Args:
         sources: Validated genome sources.
-        required_species: Canonical PCR-expected species names.
+        required_species: Canonical species names required by this run.
 
     Raises:
         ValueError: If any expected species has no source genome.
@@ -188,7 +188,7 @@ def validate_required_species(
     missing = [species for species in required_species if species.casefold() not in available]
     if missing:
         raise ValueError(
-            "Controlled minimap2 sources lack PCR-expected species: " + "; ".join(missing)
+            "Controlled minimap2 sources lack configured required species: " + "; ".join(missing)
         )
 
 
@@ -197,18 +197,20 @@ def validate_required_reference_species(
     reference_fasta: Path,
     required_species: Sequence[str],
 ) -> tuple[str, ...]:
-    """Require PCR-expected species labels in a prebuilt reference FASTA.
+    """Validate auditable species labels in a prebuilt reference FASTA.
 
     The reduced masked Plasmodium reference predates the controlled-reference
     header format. Its headers can therefore use full names (``Plasmodium
     inui``), filename-derived labels (``Plas_inui``), or abbreviations
     (``P.inui``). This check deliberately uses only explicit header evidence;
-    an accession-only reference cannot support auditable species-level PCR
-    comparison and is rejected for the minimap2 branch.
+    an accession-only reference cannot support auditable species-level
+    reporting and is rejected for the minimap2 branch.
 
     Args:
         reference_fasta: Existing plain or gzip-compressed FASTA.
-        required_species: Canonical PCR-expected species names.
+        required_species: Canonical species names required by this run. The
+            list may be empty, but the FASTA must still expose at least one
+            auditable species label.
 
     Returns:
         Unique species labels found in FASTA-header order.
@@ -237,11 +239,16 @@ def validate_required_reference_species(
                 inventory.append(species)
     if header_count == 0:
         raise ValueError(f"Classification reference FASTA contains no records: {resolved}")
+    if not inventory:
+        raise ValueError(
+            "Classification reference FASTA contains no auditable species labels; "
+            "use taxon_name=Species_name or a supported Plasmodium species label"
+        )
     missing = [species for species in required_species if species.casefold() not in seen]
     if missing:
         shown = "; ".join(inventory[:20]) if inventory else "none with auditable species labels"
         raise ValueError(
-            "Prebuilt minimap2 reference lacks PCR-expected species labels: "
+            "Prebuilt minimap2 reference lacks configured required species labels: "
             + "; ".join(missing)
             + f". Parsed reference species: {shown}"
         )

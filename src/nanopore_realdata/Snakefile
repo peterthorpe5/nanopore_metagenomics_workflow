@@ -104,7 +104,11 @@ rule preflight:
     input:
         config=str(CONFIG_PATH),
         samples=str(WORKFLOW.samples_path),
-        pcr_truth=str(WORKFLOW.pcr_truth_path),
+        pcr_truth=(
+            [str(WORKFLOW.pcr_truth_path)]
+            if WORKFLOW.pcr_truth_path is not None
+            else []
+        ),
         host_reference=(
             [str(WORKFLOW.host_reference)]
             if WORKFLOW.host_reference is not None
@@ -205,7 +209,6 @@ if WORKFLOW.minimap_genome_config is not None:
             config=str(CONFIG_PATH),
             preflight=str(PREFLIGHT),
             genome_config=str(WORKFLOW.minimap_genome_config),
-            pcr_truth=str(WORKFLOW.pcr_truth_path),
         output:
             reference=str(MINIMAP_REFERENCE),
             manifest=str(MINIMAP_REFERENCE_MANIFEST),

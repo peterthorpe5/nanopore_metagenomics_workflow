@@ -36,7 +36,7 @@ class WorkflowConfig:
     run_id: str
     output_directory: Path
     samples_path: Path
-    pcr_truth_path: Path
+    pcr_truth_path: Path | None
     input_read_state: str
     expected_repository_root: Path
     expected_package_version: str
@@ -48,6 +48,7 @@ class WorkflowConfig:
     kmersutra_panel: Path | None
     minimap_reference: Path
     minimap_genome_config: Path | None
+    minimap_required_species: tuple[str, ...]
     minimap_maximum_reference_bases: int
     minimap_index_batch_size_bases: int
     minimap_maximum_index_bytes: int
@@ -145,7 +146,12 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     run_id = _identifier(run, "id")
     output_directory = _path(run, "output_directory", base=base, must_exist=False)
     samples_path = _path(inputs, "samples", base=base, must_exist=True)
-    pcr_truth_path = _path(inputs, "pcr_truth", base=base, must_exist=True)
+    pcr_truth_path = _optional_path(
+        inputs,
+        "pcr_truth",
+        base=base,
+        must_exist=True,
+    )
     input_read_state = _choice(
         inputs,
         "read_state",
@@ -252,6 +258,10 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         kmersutra_panel=kmersutra_panel,
         minimap_reference=minimap_reference,
         minimap_genome_config=minimap_genome_config,
+        minimap_required_species=_string_tuple_allow_empty(
+            minimap2,
+            "required_species",
+        ),
         minimap_maximum_reference_bases=maximum_reference_bases,
         minimap_index_batch_size_bases=index_batch_size_bases,
         minimap_maximum_index_bytes=_positive_int(
@@ -435,11 +445,12 @@ def _validate_workflow_paths(*, workflow: WorkflowConfig) -> None:
     """Reject configurations that could overwrite source data or databases."""
     protected = {
         workflow.samples_path,
-        workflow.pcr_truth_path,
         workflow.kraken_database,
         workflow.metabuli_database,
         *(sample.fastq_paths for sample in workflow.samples),
     }
+    if workflow.pcr_truth_path is not None:
+        protected.add(workflow.pcr_truth_path)
     if workflow.minimap_genome_config is None:
         protected.add(workflow.minimap_reference)
     else:
@@ -657,4 +668,38 @@ def _string_tuple_default(
             cleaned.append(text)
     if not cleaned:
         raise ValueError(f"{key} must contain at least one value")
+    return tuple(cleaned)
+
+
+def _string_tuple_allow_empty(
+    mapping: Mapping[str, Any],
+    key: str,
+) -> tuple[str, ...]:
+    """Return an optional, de-duplicated tuple of non-empty strings.
+
+    Args:
+        mapping: Configuration section containing the value.
+        key: YAML key holding a list or an omitted value.
+
+    Returns:
+        Cleaned values in configuration order, or an empty tuple when omitted.
+
+    Raises:
+        ValueError: If the configured value is not a list or contains blanks.
+    """
+    if key not in mapping:
+        return ()
+    value = mapping.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a YAML list of non-empty strings")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            raise ValueError(f"{key} must not contain blank values")
+        folded = text.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            cleaned.append(text)
     return tuple(cleaned)

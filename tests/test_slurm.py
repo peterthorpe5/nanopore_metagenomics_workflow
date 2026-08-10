@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 from helpers import build_test_project
 from nanopore_realdata.config import load_workflow_config
 from nanopore_realdata.slurm import (
@@ -124,6 +126,32 @@ class TestSlurmPlan(unittest.TestCase):
 
 class TestSlurmSubmission(unittest.TestCase):
     """Exercise journalled submission, resume and low-level failures."""
+
+    def test_plan_rejects_an_unexpected_repository_before_submission(self) -> None:
+        """The safe plan must catch a stale deployment path before sbatch."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(
+                root=root,
+                input_read_state="host_removed",
+            )
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["deployment"]["expected_repository_root"] = str(root / "stale_copy")
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "unexpected repository copy"):
+                planned_commands(config_path=config_path)
+            with (
+                patch("nanopore_realdata.slurm._submit") as submitted,
+                self.assertRaisesRegex(RuntimeError, "unexpected repository copy"),
+            ):
+                submit_workflow(
+                    config_path=config_path,
+                    resume_submission=False,
+                    new_attempt=False,
+                )
+
+        submitted.assert_not_called()
 
     def test_submission_journals_every_job_and_refuses_ambiguous_repeat(self) -> None:
         """A complete submission is durable and cannot be repeated silently."""

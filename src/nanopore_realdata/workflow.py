@@ -30,7 +30,9 @@ from nanopore_realdata.commands import (
 from nanopore_realdata.config import Sample, WorkflowConfig, load_workflow_config
 from nanopore_realdata.minimap import summarise_minimap_paf
 from nanopore_realdata.pcr import (
+    PcrTruth,
     build_pcr_concordance,
+    canonical_species_name,
     expected_pcr_species,
     load_pcr_truth,
     pcr_truth_rows,
@@ -70,6 +72,59 @@ from nanopore_realdata.runtime import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _load_optional_pcr_truth(*, workflow: WorkflowConfig) -> tuple[PcrTruth, ...]:
+    """Load independent truth when configured, otherwise return no records.
+
+    Args:
+        workflow: Validated workflow configuration.
+
+    Returns:
+        PCR truth records in sample-manifest order, or an empty tuple when the
+        run performs classification without an independent PCR comparison.
+    """
+    if workflow.pcr_truth_path is None:
+        return ()
+    return load_pcr_truth(
+        path=workflow.pcr_truth_path,
+        samples=workflow.samples,
+    )
+
+
+def _validate_pcr_reference_contract(
+    *,
+    workflow: WorkflowConfig,
+    truth_records: Sequence[PcrTruth],
+) -> None:
+    """Require benchmark truth species to be declared in minimap2 settings.
+
+    Classification is configured independently of PCR. When PCR evaluation is
+    enabled, this guard prevents an expected species from being added to the
+    reference contract implicitly or omitted accidentally.
+
+    Args:
+        workflow: Validated workflow configuration.
+        truth_records: Optional independent PCR records.
+
+    Raises:
+        ValueError: If a PCR-positive comparison species is not explicitly
+            listed under ``minimap2.required_species``.
+    """
+    configured = {
+        canonical_species_name(value=species).casefold()
+        for species in workflow.minimap_required_species
+    }
+    missing = [
+        species
+        for species in expected_pcr_species(records=truth_records)
+        if species.casefold() not in configured
+    ]
+    if missing:
+        raise ValueError(
+            "PCR comparison species must be declared explicitly in "
+            "minimap2.required_species: " + "; ".join(missing)
+        )
+
+
 def preflight(*, config_path: Path, output_path: Path) -> None:
     """Validate configuration, input records, databases and executables.
 
@@ -79,9 +134,10 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
     """
     workflow = load_workflow_config(config_path=config_path)
     _validate_deployment_identity(workflow=workflow)
-    truth_records = load_pcr_truth(
-        path=workflow.pcr_truth_path,
-        samples=workflow.samples,
+    truth_records = _load_optional_pcr_truth(workflow=workflow)
+    _validate_pcr_reference_contract(
+        workflow=workflow,
+        truth_records=truth_records,
     )
     minimap_sources = None
     if workflow.minimap_genome_config is not None:
@@ -90,7 +146,7 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         )
         validate_required_species(
             sources=minimap_sources,
-            required_species=expected_pcr_species(records=truth_records),
+            required_species=workflow.minimap_required_species,
         )
     # Host preparation is a core dependency: without classification-ready
     # reads no classifier can run. Classifier readiness is assessed separately
@@ -102,12 +158,11 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         actions.append("accept-host-removed")
     for action in actions:
         _require_tools(action=action)
-    required_pcr_species = expected_pcr_species(records=truth_records)
     classifier_readiness = [
         _classifier_readiness(
             workflow=workflow,
             method=method,
-            required_species=required_pcr_species,
+            required_species=workflow.minimap_required_species,
         )
         for method in METHODS
     ]
@@ -180,6 +235,7 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         "checked_at_utc": utc_now(),
         "run_id": workflow.run_id,
         "sample_count": len(workflow.samples),
+        "pcr_evaluation_configured": workflow.pcr_truth_path is not None,
         "primary_pcr_sample_count": sum(
             record.include_in_primary_comparison for record in truth_records
         ),
@@ -188,6 +244,7 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         "config_sha256": sha256_file(path=workflow.config_path),
         "resources": {
             "input_read_state": workflow.input_read_state,
+            "minimap2_required_species": list(workflow.minimap_required_species),
             "host_reference": (
                 metadata_fingerprint(
                     paths=[_required_host_reference(workflow=workflow)],
@@ -204,9 +261,13 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
                 path=workflow.metabuli_database,
                 checksum_file=False,
             ),
-            "pcr_truth": _safe_resource_fingerprint(
-                path=workflow.pcr_truth_path,
-                checksum_file=True,
+            "pcr_truth": (
+                _safe_resource_fingerprint(
+                    path=workflow.pcr_truth_path,
+                    checksum_file=True,
+                )
+                if workflow.pcr_truth_path is not None
+                else "not_configured"
             ),
             "minimap2_reference": (
                 "built_by_workflow_from_genome_config"
@@ -250,7 +311,7 @@ def build_minimap_reference(
     output_manifest: Path,
     output_completion: Path,
 ) -> None:
-    """Build a bounded, PCR-complete minimap2 reference from genome sources.
+    """Build a bounded minimap2 reference from configured genome sources.
 
     Args:
         config_path: Workflow YAML path.
@@ -262,24 +323,20 @@ def build_minimap_reference(
     _validate_deployment_identity(workflow=workflow)
     if workflow.minimap_genome_config is None:
         raise ValueError("build_minimap_reference requires minimap2.genome_config")
-    truth_records = load_pcr_truth(
-        path=workflow.pcr_truth_path,
-        samples=workflow.samples,
-    )
     sources = load_genome_sources(config_path=workflow.minimap_genome_config)
     validate_required_species(
         sources=sources,
-        required_species=expected_pcr_species(records=truth_records),
+        required_species=workflow.minimap_required_species,
     )
     signature = task_signature(
         task={
             "action": "build-minimap2-reference",
             "run_id": workflow.run_id,
             "maximum_reference_bases": workflow.minimap_maximum_reference_bases,
+            "required_species": list(workflow.minimap_required_species),
         },
         inputs=[
             workflow.config_path,
-            workflow.pcr_truth_path,
             workflow.minimap_genome_config,
             *(source.genome_fasta for source in sources),
         ],
@@ -331,7 +388,7 @@ def build_minimap_reference(
             "total_bases": stats.total_bases,
             "reference_sha256": stats.reference_sha256,
             "manifest_sha256": stats.manifest_sha256,
-            "required_pcr_species": list(expected_pcr_species(records=truth_records)),
+            "required_species": list(workflow.minimap_required_species),
         },
     )
 
@@ -410,13 +467,9 @@ def build_minimap_index(
             raise FileNotFoundError(
                 f"Classification minimap2 reference is missing: {workflow.minimap_reference}"
             )
-        truth_records = load_pcr_truth(
-            path=workflow.pcr_truth_path,
-            samples=workflow.samples,
-        )
         validate_required_reference_species(
             reference_fasta=workflow.minimap_reference,
-            required_species=expected_pcr_species(records=truth_records),
+            required_species=workflow.minimap_required_species,
         )
         signature = task_signature(
             task={"action": "build-minimap2-index", "run_id": workflow.run_id},
@@ -789,10 +842,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     """
     workflow = load_workflow_config(config_path=config_path)
     _validate_deployment_identity(workflow=workflow)
-    truth_records = load_pcr_truth(
-        path=workflow.pcr_truth_path,
-        samples=workflow.samples,
-    )
+    truth_records = _load_optional_pcr_truth(workflow=workflow)
     truth_by_sample = {record.sample_id: record for record in truth_records}
     final_root = completion_path.parent
     final_root.mkdir(parents=True, exist_ok=True)
@@ -803,7 +853,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     kmersutra_rows: list[dict[str, Any]] = []
     warning_rows: list[dict[str, str]] = []
     for sample in workflow.samples:
-        truth = truth_by_sample[sample.sample_id]
+        truth = truth_by_sample.get(sample.sample_id)
         try:
             host_summary = _read_single_tsv(
                 path=_host_result_directory(workflow=workflow, sample=sample)
@@ -933,9 +983,13 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             {
                 **host_summary,
                 "input_read_state": workflow.input_read_state,
-                "pcr_status": truth.pcr_status,
-                "pcr_species": truth.pcr_species_source_text,
-                "include_in_primary_comparison": str(truth.include_in_primary_comparison).lower(),
+                "pcr_status": truth.pcr_status if truth is not None else "not_configured",
+                "pcr_species": truth.pcr_species_source_text if truth is not None else "",
+                "include_in_primary_comparison": (
+                    str(truth.include_in_primary_comparison).lower()
+                    if truth is not None
+                    else "false"
+                ),
                 **{f"{method}_status": sample_statuses[method] for method in METHODS},
             }
         )
@@ -1127,6 +1181,14 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     )
     report_manifest_path = final_root / "report_manifest.json"
     readme_path = final_root / "README.txt"
+    pcr_readme = (
+        "pcr_truth.tsv preserves the independent PCR interpretation used for evaluation.\n"
+        "pcr_concordance.tsv compares each method with PCR without converting failures "
+        "into biological non-detections.\n"
+        "pcr_method_summary.tsv reports exact counts and denominators by method.\n"
+        if truth_records
+        else "PCR evaluation was not configured; PCR TSV files contain schema headers only.\n"
+    )
     readme_path.write_text(
         "Nanopore real-data workflow final results\n\n"
         "Open reports/index.html for the offline final report.\n"
@@ -1141,10 +1203,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         "kmersutra_species_calls.tsv.gz combines KmerSutra species calls.\n"
         "normalised_classifier_evidence.tsv.gz supports descriptive comparison without "
         "forcing consensus.\n"
-        "pcr_truth.tsv preserves the independent PCR interpretation used for evaluation.\n"
-        "pcr_concordance.tsv compares each method with PCR without converting failures "
-        "into biological non-detections.\n"
-        "pcr_method_summary.tsv reports exact counts and denominators by method.\n"
+        f"{pcr_readme}"
         "report_data.json is a reusable machine-readable reporting payload.\n"
         "report_warnings.tsv records non-fatal parsing or completeness problems.\n"
         "SHA256SUMS.tsv records final-file checksums.\n",
@@ -1199,6 +1258,7 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "completed_at_utc": utc_now(),
             "run_id": workflow.run_id,
             "sample_count": len(workflow.samples),
+            "pcr_evaluation_configured": workflow.pcr_truth_path is not None,
             "successful_classifier_runs": successful,
             "expected_classifier_runs": len(enabled_statuses),
             "reports_generated": True,

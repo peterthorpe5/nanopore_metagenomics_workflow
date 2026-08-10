@@ -8,14 +8,16 @@ usage() {
         "Initialise or run a new Nanopore dataset without changing package files." \
         "" \
         "Required:" \
-        "  --action initialise|validate|dry-run|run" \
+        "  --action initialise|validate|plan-slurm|submit-slurm|" \
+        "           resume-submission|new-attempt|dry-run|run" \
         "  --config PATH" \
         "" \
         "Options:" \
         "  --samples PATH   Sample-sheet path used by initialise" \
         "                   (default: CONFIG basename with .samples.tsv)" \
-        "  --pcr-truth PATH PCR truth path used by initialise" \
-        "                   (default: CONFIG basename with .pcr_truth.tsv)" \
+        "  --with-pcr-truth Create an optional PCR truth template" \
+        "  --pcr-truth PATH PCR truth path used by initialise; implies" \
+        "                   --with-pcr-truth" \
         "  --profile PATH   Snakemake profile for dry-run/run" \
         "  --jobs INT       Maximum jobs (default: 10)" \
         "  --help" \
@@ -23,6 +25,8 @@ usage() {
         "Examples:" \
         "  bash scripts/start_new_dataset.sh --action initialise --config config/my_run.yaml" \
         "  bash scripts/start_new_dataset.sh --action validate --config config/my_run.yaml" \
+        "  bash scripts/start_new_dataset.sh --action plan-slurm --config config/my_run.yaml" \
+        "  bash scripts/start_new_dataset.sh --action submit-slurm --config config/my_run.yaml" \
         "  bash scripts/start_new_dataset.sh --action dry-run --config config/my_run.yaml" \
         "  bash scripts/start_new_dataset.sh --action run --config config/my_run.yaml"
 }
@@ -31,6 +35,7 @@ ACTION=""
 CONFIG_PATH=""
 SAMPLES_PATH=""
 PCR_TRUTH_PATH=""
+WITH_PCR_TRUTH="false"
 PROFILE_PATH=""
 JOBS="10"
 
@@ -54,7 +59,12 @@ while [[ $# -gt 0 ]]; do
         --pcr-truth)
             [[ $# -ge 2 ]] || { printf 'ERROR: --pcr-truth requires a value\n' >&2; exit 2; }
             PCR_TRUTH_PATH="$2"
+            WITH_PCR_TRUTH="true"
             shift 2
+            ;;
+        --with-pcr-truth)
+            WITH_PCR_TRUTH="true"
+            shift
             ;;
         --profile)
             [[ $# -ge 2 ]] || { printf 'ERROR: --profile requires a value\n' >&2; exit 2; }
@@ -96,7 +106,7 @@ if [[ -z "${SAMPLES_PATH}" ]]; then
         SAMPLES_PATH="${CONFIG_PATH}.samples.tsv"
     fi
 fi
-if [[ -z "${PCR_TRUTH_PATH}" ]]; then
+if [[ "${WITH_PCR_TRUTH}" == "true" && -z "${PCR_TRUTH_PATH}" ]]; then
     if [[ "${CONFIG_PATH}" == *.yaml ]]; then
         PCR_TRUTH_PATH="${CONFIG_PATH%.yaml}.pcr_truth.tsv"
     elif [[ "${CONFIG_PATH}" == *.yml ]]; then
@@ -108,31 +118,60 @@ fi
 
 case "${ACTION}" in
     initialise)
-        if [[ -e "${CONFIG_PATH}" \
-            || -e "${SAMPLES_PATH}" \
-            || -e "${PCR_TRUTH_PATH}" ]]; then
+        if [[ -e "${CONFIG_PATH}" || -e "${SAMPLES_PATH}" \
+            || ( "${WITH_PCR_TRUTH}" == "true" && -e "${PCR_TRUTH_PATH}" ) ]]; then
             printf 'ERROR: refusing to overwrite an existing run template:\n' >&2
-            printf '  %s\n  %s\n  %s\n' \
-                "${CONFIG_PATH}" "${SAMPLES_PATH}" "${PCR_TRUTH_PATH}" >&2
+            printf '  %s\n  %s\n' "${CONFIG_PATH}" "${SAMPLES_PATH}" >&2
+            if [[ "${WITH_PCR_TRUTH}" == "true" ]]; then
+                printf '  %s\n' "${PCR_TRUTH_PATH}" >&2
+            fi
             exit 3
         fi
         mkdir -p -- \
             "$(dirname -- "${CONFIG_PATH}")" \
-            "$(dirname -- "${SAMPLES_PATH}")" \
-            "$(dirname -- "${PCR_TRUTH_PATH}")"
+            "$(dirname -- "${SAMPLES_PATH}")"
+        if [[ "${WITH_PCR_TRUTH}" == "true" ]]; then
+            mkdir -p -- "$(dirname -- "${PCR_TRUTH_PATH}")"
+        fi
         cp -- "${REPO_DIR}/config/real_data.template.yaml" "${CONFIG_PATH}"
         cp -- "${REPO_DIR}/config/samples.template.tsv" "${SAMPLES_PATH}"
-        cp -- "${REPO_DIR}/config/pcr_truth.template.tsv" "${PCR_TRUTH_PATH}"
         printf 'Created configuration: %s\n' "${CONFIG_PATH}"
         printf 'Created sample sheet: %s\n' "${SAMPLES_PATH}"
-        printf 'Created PCR truth table: %s\n' "${PCR_TRUTH_PATH}"
+        if [[ "${WITH_PCR_TRUTH}" == "true" ]]; then
+            cp -- "${REPO_DIR}/config/pcr_truth.template.tsv" "${PCR_TRUTH_PATH}"
+            printf 'Created optional PCR truth table: %s\n' "${PCR_TRUTH_PATH}"
+            printf '%s\n' \
+                "Set inputs.pcr_truth in the YAML to this file after populating it."
+        fi
         printf '%s\n' \
-            "Next: populate both TSV files, edit every absolute resource path in the YAML," \
+            "Next: populate the sample TSV, edit every absolute resource path in the YAML," \
             "set inputs.read_state deliberately, then run --action validate."
         ;;
     validate)
         [[ -f "${CONFIG_PATH}" ]] || { printf 'ERROR: missing config: %s\n' "${CONFIG_PATH}" >&2; exit 2; }
         nanopore-realdata --action validate --config "${CONFIG_PATH}"
+        ;;
+    plan-slurm|submit-slurm|resume-submission|new-attempt)
+        [[ -f "${CONFIG_PATH}" ]] || { printf 'ERROR: missing config: %s\n' "${CONFIG_PATH}" >&2; exit 2; }
+        CLI_ACTION="${ACTION}"
+        SUBMISSION_FLAG=""
+        if [[ "${ACTION}" == "resume-submission" ]]; then
+            CLI_ACTION="submit-slurm"
+            SUBMISSION_FLAG="--resume-submission"
+        elif [[ "${ACTION}" == "new-attempt" ]]; then
+            CLI_ACTION="submit-slurm"
+            SUBMISSION_FLAG="--new-attempt"
+        fi
+        COMMAND=(
+            nanopore-realdata
+            --action "${CLI_ACTION}"
+            --config "${CONFIG_PATH}"
+            --verbose
+        )
+        if [[ -n "${SUBMISSION_FLAG}" ]]; then
+            COMMAND+=("${SUBMISSION_FLAG}")
+        fi
+        "${COMMAND[@]}"
         ;;
     dry-run|run)
         [[ -f "${CONFIG_PATH}" ]] || { printf 'ERROR: missing config: %s\n' "${CONFIG_PATH}" >&2; exit 2; }

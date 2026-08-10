@@ -26,6 +26,7 @@ def build_test_project(
     failure_policy: str = "continue",
     stage_resources: bool = False,
     input_read_state: str = "raw",
+    pcr_truth_enabled: bool = True,
 ) -> Path:
     """Create a minimal valid project and return its YAML path."""
     root.mkdir(parents=True, exist_ok=True)
@@ -55,13 +56,14 @@ def build_test_project(
     with gzip.open(panel, "wt", encoding="utf-8") as handle:
         handle.write("kmer\tk\tspecies_name\nAAAA\t51\tSpecies alpha\n")
     pcr_truth = root / "pcr_truth.tsv"
-    pcr_truth.write_text(
-        "sample_id\tpcr_status\tpcr_species\tpcr_assay_or_source\t"
-        "pcr_notes\tinclude_in_primary_comparison\n"
-        "sample_1\tpositive\tSpecies alpha\tSynthetic PCR\t"
-        "Synthetic truth\ttrue\n",
-        encoding="utf-8",
-    )
+    if pcr_truth_enabled:
+        pcr_truth.write_text(
+            "sample_id\tpcr_status\tpcr_species\tpcr_assay_or_source\t"
+            "pcr_notes\tinclude_in_primary_comparison\n"
+            "sample_1\tpositive\tSpecies alpha\tSynthetic PCR\t"
+            "Synthetic truth\ttrue\n",
+            encoding="utf-8",
+        )
     repository_root = Path(__file__).resolve().parents[1]
     config = {
         "schema_version": 3,
@@ -71,12 +73,12 @@ def build_test_project(
         },
         "deployment": {
             "expected_repository_root": str(repository_root),
-            "expected_package_version": "0.4.0",
+            "expected_package_version": "0.4.1",
             "conda_environment": "test_environment",
         },
         "inputs": {
             "samples": str(samples),
-            "pcr_truth": str(pcr_truth),
+            "pcr_truth": str(pcr_truth) if pcr_truth_enabled else "",
             "read_state": input_read_state,
         },
         "host": {"reference": str(host_reference), "index": ""},
@@ -87,6 +89,7 @@ def build_test_project(
         },
         "minimap2": {
             "reference": str(minimap_reference),
+            "required_species": ["Species alpha"],
             "index": "",
             "min_mapq": 15,
             "min_alignment": 500,

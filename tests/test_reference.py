@@ -106,7 +106,7 @@ class TestControlledReference(unittest.TestCase):
                 )
 
     def test_masked_reference_header_variants_are_species_auditable(self) -> None:
-        """Legacy focused-reference labels should support exact PCR species checks."""
+        """Legacy focused-reference labels should support exact species checks."""
         with tempfile.TemporaryDirectory() as temporary:
             reference = Path(temporary) / "masked.fa"
             reference.write_text(
@@ -119,7 +119,7 @@ class TestControlledReference(unittest.TestCase):
                 reference_fasta=reference,
                 required_species=("Plasmodium inui", "Plasmodium cynomolgi"),
             )
-            with self.assertRaisesRegex(ValueError, "PCR-expected"):
+            with self.assertRaisesRegex(ValueError, "required species"):
                 validate_required_reference_species(
                     reference_fasta=reference,
                     required_species=("Plasmodium vivax",),
@@ -132,6 +132,17 @@ class TestControlledReference(unittest.TestCase):
             species_name_from_header(header="ref taxon_name=P._inui"),
             "Plasmodium inui",
         )
+
+    def test_reference_requires_auditable_labels_without_required_species(self) -> None:
+        """Generic runs must not accept an accession-only minimap2 reference."""
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "unlabelled.fa"
+            reference.write_text(">GCF_000000001.1\nACGT\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no auditable species labels"):
+                validate_required_reference_species(
+                    reference_fasta=reference,
+                    required_species=(),
+                )
 
 
 if __name__ == "__main__":

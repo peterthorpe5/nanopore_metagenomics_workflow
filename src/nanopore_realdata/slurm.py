@@ -185,6 +185,35 @@ def build_submission_plan(*, workflow: WorkflowConfig) -> tuple[JobPlan, ...]:
     return tuple(plans)
 
 
+def _validated_repository_root(*, workflow: WorkflowConfig) -> Path:
+    """Validate the executing checkout and configured package version.
+
+    Args:
+        workflow: Validated workflow configuration.
+
+    Returns:
+        Resolved root of the checkout providing the executing Python module.
+
+    Raises:
+        RuntimeError: If the executing checkout or package version differs from
+            the frozen deployment configuration.
+    """
+    repository_root = Path(__file__).resolve().parents[2]
+    expected_root = workflow.expected_repository_root.resolve()
+    if repository_root != expected_root:
+        raise RuntimeError(
+            "Refusing Slurm execution from an unexpected repository copy: "
+            f"actual={repository_root}; expected={expected_root}; "
+            f"config={workflow.config_path}"
+        )
+    if __version__ != workflow.expected_package_version:
+        raise RuntimeError(
+            f"Refusing Slurm execution from version {__version__}; "
+            f"expected {workflow.expected_package_version}"
+        )
+    return repository_root
+
+
 def submit_workflow(
     *,
     config_path: Path,
@@ -208,16 +237,7 @@ def submit_workflow(
     if resume_submission and new_attempt:
         raise ValueError("resume_submission and new_attempt are mutually exclusive")
     workflow = load_workflow_config(config_path=config_path)
-    repository_root = Path(__file__).resolve().parents[2]
-    if repository_root != workflow.expected_repository_root.resolve():
-        raise RuntimeError(
-            f"Refusing Slurm submission from an unexpected repository copy: {repository_root}"
-        )
-    if __version__ != workflow.expected_package_version:
-        raise RuntimeError(
-            f"Refusing Slurm submission from version {__version__}; "
-            f"expected {workflow.expected_package_version}"
-        )
+    repository_root = _validated_repository_root(workflow=workflow)
     stage_script = repository_root / "workflow" / "slurm" / "run_stage.sh"
     if not stage_script.is_file():
         raise FileNotFoundError(f"Slurm stage wrapper is missing: {stage_script}")
@@ -302,6 +322,7 @@ def planned_commands(*, config_path: Path) -> list[dict[str, Any]]:
         Ordered symbolic job descriptions.
     """
     workflow = load_workflow_config(config_path=config_path)
+    _validated_repository_root(workflow=workflow)
     return [
         {
             "key": plan.key,

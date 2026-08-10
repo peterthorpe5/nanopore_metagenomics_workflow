@@ -37,6 +37,19 @@ class TestConfiguration(unittest.TestCase):
         self.assertEqual(workflow.kmersutra_failure_policy, "continue")
         self.assertEqual(workflow.minimap_min_mapq, 15)
         self.assertEqual(workflow.minimap_min_alignment, 500)
+        self.assertEqual(workflow.minimap_required_species, ("Species alpha",))
+        self.assertIsNotNone(workflow.pcr_truth_path)
+
+    def test_pcr_truth_is_optional_for_unlabelled_real_samples(self) -> None:
+        """Classification should not require an independent benchmark truth set."""
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = build_test_project(
+                root=Path(temporary),
+                pcr_truth_enabled=False,
+            )
+            workflow = load_workflow_config(config_path=config_path)
+        self.assertIsNone(workflow.pcr_truth_path)
+        self.assertEqual(workflow.minimap_required_species, ("Species alpha",))
 
     def test_host_removed_configuration_does_not_require_a_host_reference(self) -> None:
         """Classification-ready reads must bypass host-reference requirements."""
@@ -152,8 +165,20 @@ class TestConfiguration(unittest.TestCase):
             "/home/pthorpe001/data/project_back_up_2024/Janet_genome_databases/"
             "genome_to_use/plas_outgrps_genomes_Hard_MASKED.fasta"
         )
+        expected_repository = (
+            "/gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/"
+            "2026_plasmodium_kraken_sensitivity/nanopore_metagenomics_workflow"
+        )
         self.assertEqual(config["schema_version"], 3)
+        self.assertEqual(
+            config["deployment"]["expected_repository_root"],
+            expected_repository,
+        )
         self.assertEqual(config["minimap2"]["reference"], expected_reference)
+        self.assertEqual(
+            config["minimap2"]["required_species"],
+            ["Plasmodium inui", "Plasmodium cynomolgi"],
+        )
         self.assertEqual(config["minimap2"]["genome_config"], "")
         self.assertEqual(config["minimap2"]["index"], "")
         self.assertEqual(len(samples), 11)
