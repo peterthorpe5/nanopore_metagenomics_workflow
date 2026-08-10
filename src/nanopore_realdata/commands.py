@@ -6,17 +6,30 @@ from pathlib import Path
 from typing import Sequence
 
 
-def minimap2_index_command(*, reference: Path, output_index: Path) -> list[str]:
+def minimap2_index_command(
+    *,
+    reference: Path,
+    output_index: Path,
+    index_batch_size_bases: int | None = None,
+) -> list[str]:
     """Build the minimap2 host-index command.
 
     Args:
         reference: Host reference FASTA.
         output_index: Destination MMI path.
+        index_batch_size_bases: Optional hard batch size used to require a
+            single classification-index part.
 
     Returns:
         Argument vector suitable for ``subprocess`` without a shell.
     """
-    return ["minimap2", "-d", str(output_index), str(reference)]
+    command = ["minimap2"]
+    if index_batch_size_bases is not None:
+        if index_batch_size_bases <= 0:
+            raise ValueError("Minimap2 index batch size must be positive")
+        command.extend(["-I", str(index_batch_size_bases)])
+    command.extend(["-d", str(output_index), str(reference)])
+    return command
 
 
 def minimap2_host_command(

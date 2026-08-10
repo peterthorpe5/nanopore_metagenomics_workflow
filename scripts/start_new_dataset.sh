@@ -14,6 +14,8 @@ usage() {
         "Options:" \
         "  --samples PATH   Sample-sheet path used by initialise" \
         "                   (default: CONFIG basename with .samples.tsv)" \
+        "  --pcr-truth PATH PCR truth path used by initialise" \
+        "                   (default: CONFIG basename with .pcr_truth.tsv)" \
         "  --profile PATH   Snakemake profile for dry-run/run" \
         "  --jobs INT       Maximum jobs (default: 10)" \
         "  --help" \
@@ -28,6 +30,7 @@ usage() {
 ACTION=""
 CONFIG_PATH=""
 SAMPLES_PATH=""
+PCR_TRUTH_PATH=""
 PROFILE_PATH=""
 JOBS="10"
 
@@ -46,6 +49,11 @@ while [[ $# -gt 0 ]]; do
         --samples)
             [[ $# -ge 2 ]] || { printf 'ERROR: --samples requires a value\n' >&2; exit 2; }
             SAMPLES_PATH="$2"
+            shift 2
+            ;;
+        --pcr-truth)
+            [[ $# -ge 2 ]] || { printf 'ERROR: --pcr-truth requires a value\n' >&2; exit 2; }
+            PCR_TRUTH_PATH="$2"
             shift 2
             ;;
         --profile)
@@ -88,22 +96,39 @@ if [[ -z "${SAMPLES_PATH}" ]]; then
         SAMPLES_PATH="${CONFIG_PATH}.samples.tsv"
     fi
 fi
+if [[ -z "${PCR_TRUTH_PATH}" ]]; then
+    if [[ "${CONFIG_PATH}" == *.yaml ]]; then
+        PCR_TRUTH_PATH="${CONFIG_PATH%.yaml}.pcr_truth.tsv"
+    elif [[ "${CONFIG_PATH}" == *.yml ]]; then
+        PCR_TRUTH_PATH="${CONFIG_PATH%.yml}.pcr_truth.tsv"
+    else
+        PCR_TRUTH_PATH="${CONFIG_PATH}.pcr_truth.tsv"
+    fi
+fi
 
 case "${ACTION}" in
     initialise)
-        if [[ -e "${CONFIG_PATH}" || -e "${SAMPLES_PATH}" ]]; then
-            printf 'ERROR: refusing to overwrite an existing config or sample sheet:\n' >&2
-            printf '  %s\n  %s\n' "${CONFIG_PATH}" "${SAMPLES_PATH}" >&2
+        if [[ -e "${CONFIG_PATH}" \
+            || -e "${SAMPLES_PATH}" \
+            || -e "${PCR_TRUTH_PATH}" ]]; then
+            printf 'ERROR: refusing to overwrite an existing run template:\n' >&2
+            printf '  %s\n  %s\n  %s\n' \
+                "${CONFIG_PATH}" "${SAMPLES_PATH}" "${PCR_TRUTH_PATH}" >&2
             exit 3
         fi
-        mkdir -p -- "$(dirname -- "${CONFIG_PATH}")" "$(dirname -- "${SAMPLES_PATH}")"
+        mkdir -p -- \
+            "$(dirname -- "${CONFIG_PATH}")" \
+            "$(dirname -- "${SAMPLES_PATH}")" \
+            "$(dirname -- "${PCR_TRUTH_PATH}")"
         cp -- "${REPO_DIR}/config/real_data.template.yaml" "${CONFIG_PATH}"
         cp -- "${REPO_DIR}/config/samples.template.tsv" "${SAMPLES_PATH}"
+        cp -- "${REPO_DIR}/config/pcr_truth.template.tsv" "${PCR_TRUTH_PATH}"
         printf 'Created configuration: %s\n' "${CONFIG_PATH}"
         printf 'Created sample sheet: %s\n' "${SAMPLES_PATH}"
+        printf 'Created PCR truth table: %s\n' "${PCR_TRUTH_PATH}"
         printf '%s\n' \
-            "Next: add one FASTQ path per row to the TSV, edit every absolute resource path" \
-            "in the YAML, set inputs.read_state deliberately, then run --action validate."
+            "Next: populate both TSV files, edit every absolute resource path in the YAML," \
+            "set inputs.read_state deliberately, then run --action validate."
         ;;
     validate)
         [[ -f "${CONFIG_PATH}" ]] || { printf 'ERROR: missing config: %s\n' "${CONFIG_PATH}" >&2; exit 2; }

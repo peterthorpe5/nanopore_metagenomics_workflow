@@ -1,0 +1,4 @@
+sample_id	pcr_status	pcr_species	pcr_assay_or_source	pcr_notes	include_in_primary_comparison
+sample_01	positive	Plasmodium inui	Independent PCR	Independent assay result	true
+sample_02	negative		Independent PCR	Independent assay result	true
+sample_03	unknown			No independent PCR result	false

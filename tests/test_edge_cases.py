@@ -194,6 +194,140 @@ class TestCliRouting(unittest.TestCase):
             root / "results" / "03_final" / "workflow.complete.json",
         )
 
+    def test_detached_actions_resolve_defaults_and_sample_indices(self) -> None:
+        """Detached CLI jobs should derive durable outputs from one config."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(
+                root=root,
+                input_read_state="host_removed",
+            )
+            workflow = load_workflow_config(config_path=config_path)
+            cases = (
+                (
+                    ["--action", "build-minimap-index", "--config", str(config_path)],
+                    "nanopore_realdata.cli.build_minimap_index",
+                    "output_completion",
+                    workflow.output_directory
+                    / "00_preflight"
+                    / "classification_reference_index.complete.json",
+                ),
+                (
+                    ["--action", "accept-host-removed", "--config", str(config_path)],
+                    "nanopore_realdata.cli.accept_host_removed_batch",
+                    "stage_completion",
+                    workflow.output_directory / "01_host_depletion" / "stage.complete.json",
+                ),
+                (
+                    [
+                        "--action",
+                        "classify",
+                        "--config",
+                        str(config_path),
+                        "--method",
+                        "kraken2",
+                        "--sample-index",
+                        "0",
+                    ],
+                    "nanopore_realdata.cli.classify_batch",
+                    "stage_completion",
+                    workflow.output_directory
+                    / "02_classification"
+                    / "kraken2"
+                    / "sample_1"
+                    / "stage.complete.json",
+                ),
+                (
+                    ["--action", "aggregate", "--config", str(config_path)],
+                    "nanopore_realdata.cli.aggregate_results",
+                    "completion_path",
+                    workflow.output_directory / "03_final" / "workflow.complete.json",
+                ),
+            )
+            for arguments, target, output_key, expected in cases:
+                with self.subTest(action=arguments[1]), patch(target) as mocked:
+                    self.assertEqual(main(arguments), 0)
+                    self.assertEqual(mocked.call_args.kwargs[output_key], expected)
+
+            with patch("nanopore_realdata.cli.record_scheduler_failure") as recorder:
+                self.assertEqual(
+                    main(
+                        [
+                            "--action",
+                            "record-scheduler-failure",
+                            "--config",
+                            str(config_path),
+                            "--method",
+                            "minimap2",
+                            "--sample-index",
+                            "0",
+                            "--message",
+                            "Slurm hard kill",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(recorder.call_args.kwargs["sample_id"], "sample_1")
+
+            with (
+                patch("nanopore_realdata.cli.planned_commands", return_value=[{"key": "x"}]),
+                patch("builtins.print") as printed,
+            ):
+                self.assertEqual(
+                    main(["--action", "plan-slurm", "--config", str(config_path)]),
+                    0,
+                )
+            self.assertTrue(printed.called)
+
+            journal = root / "journal.json"
+            with patch("nanopore_realdata.cli.submit_workflow", return_value=journal) as submit:
+                self.assertEqual(
+                    main(
+                        [
+                            "--action",
+                            "submit-slurm",
+                            "--config",
+                            str(config_path),
+                            "--new-attempt",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertTrue(submit.call_args.kwargs["new_attempt"])
+
+    def test_generated_reference_action_uses_configured_defaults(self) -> None:
+        """The optional generic reference builder should remain CLI-reachable."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root)
+            genome_config = root / "genomes.tsv"
+            genome_config.write_text("placeholder\n", encoding="utf-8")
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            data["minimap2"]["reference"] = ""
+            data["minimap2"]["genome_config"] = str(genome_config)
+            config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+            workflow = load_workflow_config(config_path=config_path)
+            with patch("nanopore_realdata.cli.build_minimap_reference") as build:
+                self.assertEqual(
+                    main(
+                        [
+                            "--action",
+                            "build-minimap-reference",
+                            "--config",
+                            str(config_path),
+                        ]
+                    ),
+                    0,
+                )
+            kwargs = build.call_args.kwargs
+        self.assertEqual(kwargs["output_reference"], workflow.minimap_reference)
+        self.assertEqual(
+            kwargs["output_manifest"],
+            workflow.output_directory
+            / "00_preflight"
+            / "controlled_minimap_reference.manifest.tsv",
+        )
+
 
 class TestConfigurationEdges(unittest.TestCase):
     """Cover validation branches that protect real input data."""

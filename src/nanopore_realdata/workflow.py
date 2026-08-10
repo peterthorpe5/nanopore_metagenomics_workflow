@@ -29,6 +29,19 @@ from nanopore_realdata.commands import (
 )
 from nanopore_realdata.config import Sample, WorkflowConfig, load_workflow_config
 from nanopore_realdata.minimap import summarise_minimap_paf
+from nanopore_realdata.pcr import (
+    build_pcr_concordance,
+    expected_pcr_species,
+    load_pcr_truth,
+    pcr_truth_rows,
+)
+from nanopore_realdata.reference import (
+    build_controlled_reference,
+    load_genome_sources,
+    validate_required_reference_species,
+    validate_required_species,
+    validate_single_part_index_log,
+)
 from nanopore_realdata.reporting import (
     METHODS,
     build_normalised_evidence,
@@ -65,6 +78,20 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         output_path: Declared preflight JSON output.
     """
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
+    truth_records = load_pcr_truth(
+        path=workflow.pcr_truth_path,
+        samples=workflow.samples,
+    )
+    minimap_sources = None
+    if workflow.minimap_genome_config is not None:
+        minimap_sources = load_genome_sources(
+            config_path=workflow.minimap_genome_config,
+        )
+        validate_required_species(
+            sources=minimap_sources,
+            required_species=expected_pcr_species(records=truth_records),
+        )
     # Host preparation is a core dependency: without classification-ready
     # reads no classifier can run. Classifier readiness is assessed separately
     # and recorded rather than raised, allowing healthy branches to continue.
@@ -75,8 +102,14 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         actions.append("accept-host-removed")
     for action in actions:
         _require_tools(action=action)
+    required_pcr_species = expected_pcr_species(records=truth_records)
     classifier_readiness = [
-        _classifier_readiness(workflow=workflow, method=method) for method in METHODS
+        _classifier_readiness(
+            workflow=workflow,
+            method=method,
+            required_species=required_pcr_species,
+        )
+        for method in METHODS
     ]
     sample_rows = []
     for sample in workflow.samples:
@@ -129,11 +162,27 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
         rows=classifier_readiness,
         fieldnames=("method", "status", "message", "resource"),
     )
+    _write_tsv(
+        path=output_path.parent / "resolved_pcr_truth.tsv",
+        rows=pcr_truth_rows(records=truth_records),
+        fieldnames=(
+            "sample_id",
+            "pcr_status",
+            "pcr_species",
+            "pcr_species_canonical",
+            "pcr_assay_or_source",
+            "pcr_notes",
+            "include_in_primary_comparison",
+        ),
+    )
     payload = {
         "status": "success",
         "checked_at_utc": utc_now(),
         "run_id": workflow.run_id,
         "sample_count": len(workflow.samples),
+        "primary_pcr_sample_count": sum(
+            record.include_in_primary_comparison for record in truth_records
+        ),
         "fastq_part_count": len(sample_rows),
         "config": str(workflow.config_path),
         "config_sha256": sha256_file(path=workflow.config_path),
@@ -155,18 +204,30 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
                 path=workflow.metabuli_database,
                 checksum_file=False,
             ),
-            "minimap2_reference": _safe_resource_fingerprint(
-                path=workflow.minimap_reference,
+            "pcr_truth": _safe_resource_fingerprint(
+                path=workflow.pcr_truth_path,
                 checksum_file=True,
             ),
-            "minimap2_index": (
-                _safe_resource_fingerprint(
-                    path=workflow.minimap_index,
+            "minimap2_reference": (
+                "built_by_workflow_from_genome_config"
+                if workflow.minimap_genome_config is not None
+                else _safe_resource_fingerprint(
+                    path=workflow.minimap_reference,
                     checksum_file=True,
                 )
-                if workflow.minimap_index is not None
-                else "built_by_workflow_from_configured_reference"
             ),
+            "minimap2_genome_config": (
+                _safe_resource_fingerprint(
+                    path=workflow.minimap_genome_config,
+                    checksum_file=True,
+                )
+                if workflow.minimap_genome_config is not None
+                else "not_applicable_prebuilt_reference"
+            ),
+            "minimap2_source_genome_count": (
+                len(minimap_sources) if minimap_sources is not None else "not_applicable"
+            ),
+            "minimap2_index": "built_by_workflow_with_single_part_validation",
             "kmersutra_panel": (
                 _safe_resource_fingerprint(
                     path=_required_kmersutra_panel(workflow=workflow),
@@ -182,6 +243,99 @@ def preflight(*, config_path: Path, output_path: Path) -> None:
     write_json_atomic(path=output_path, payload=payload)
 
 
+def build_minimap_reference(
+    *,
+    config_path: Path,
+    output_reference: Path,
+    output_manifest: Path,
+    output_completion: Path,
+) -> None:
+    """Build a bounded, PCR-complete minimap2 reference from genome sources.
+
+    Args:
+        config_path: Workflow YAML path.
+        output_reference: Controlled FASTA destination.
+        output_manifest: Sequence-level provenance table destination.
+        output_completion: Durable success record.
+    """
+    workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
+    if workflow.minimap_genome_config is None:
+        raise ValueError("build_minimap_reference requires minimap2.genome_config")
+    truth_records = load_pcr_truth(
+        path=workflow.pcr_truth_path,
+        samples=workflow.samples,
+    )
+    sources = load_genome_sources(config_path=workflow.minimap_genome_config)
+    validate_required_species(
+        sources=sources,
+        required_species=expected_pcr_species(records=truth_records),
+    )
+    signature = task_signature(
+        task={
+            "action": "build-minimap2-reference",
+            "run_id": workflow.run_id,
+            "maximum_reference_bases": workflow.minimap_maximum_reference_bases,
+        },
+        inputs=[
+            workflow.config_path,
+            workflow.pcr_truth_path,
+            workflow.minimap_genome_config,
+            *(source.genome_fasta for source in sources),
+        ],
+        checksum_files=False,
+    )
+    if completion_is_valid(
+        completion_path=output_completion,
+        signature=signature,
+        outputs=[output_reference, output_manifest],
+    ):
+        LOGGER.info("Controlled minimap2 reference is already complete: %s", output_reference)
+        return
+    validate_scratch(
+        scratch_root=workflow.scratch_root,
+        minimum_gb=workflow.minimum_scratch_gb,
+    )
+    with scratch_workspace(
+        scratch_root=workflow.scratch_root,
+        label="controlled_minimap_reference",
+    ) as workspace:
+        local_reference = workspace / "controlled_minimap_reference.fa"
+        local_manifest = workspace / "controlled_minimap_reference.manifest.tsv"
+        stats = build_controlled_reference(
+            sources=sources,
+            output_fasta=local_reference,
+            output_manifest=local_manifest,
+            maximum_reference_bases=workflow.minimap_maximum_reference_bases,
+        )
+        publish_log = output_reference.parent / "controlled_minimap_reference.publish.log"
+        _publish_file(
+            source=local_reference,
+            destination=output_reference,
+            log_path=publish_log,
+        )
+        _publish_file(
+            source=local_manifest,
+            destination=output_manifest,
+            log_path=publish_log,
+        )
+    write_completion(
+        completion_path=output_completion,
+        signature=signature,
+        outputs=[output_reference, output_manifest],
+        extra={
+            "action": "build-minimap2-reference",
+            "genome_config": str(workflow.minimap_genome_config),
+            "genome_count": stats.genome_count,
+            "reference_record_count": stats.reference_record_count,
+            "total_bases": stats.total_bases,
+            "reference_sha256": stats.reference_sha256,
+            "manifest_sha256": stats.manifest_sha256,
+            "required_pcr_species": list(expected_pcr_species(records=truth_records)),
+        },
+    )
+
+
 def build_host_index(
     *,
     config_path: Path,
@@ -190,6 +344,7 @@ def build_host_index(
 ) -> None:
     """Build the host minimap2 index once using node-local scratch."""
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
     host_reference = _required_host_reference(workflow=workflow)
     signature = task_signature(
         task={"action": "build-host-index", "run_id": workflow.run_id},
@@ -248,12 +403,21 @@ def build_minimap_index(
     report Kraken2, Metabuli and KmerSutra results.
     """
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
     stage_log = output_index.parent / "minimap2_index.log"
     try:
         if not workflow.minimap_reference.is_file():
             raise FileNotFoundError(
                 f"Classification minimap2 reference is missing: {workflow.minimap_reference}"
             )
+        truth_records = load_pcr_truth(
+            path=workflow.pcr_truth_path,
+            samples=workflow.samples,
+        )
+        validate_required_reference_species(
+            reference_fasta=workflow.minimap_reference,
+            required_species=expected_pcr_species(records=truth_records),
+        )
         signature = task_signature(
             task={"action": "build-minimap2-index", "run_id": workflow.run_id},
             inputs=[workflow.minimap_reference, workflow.config_path],
@@ -266,6 +430,7 @@ def build_minimap_index(
         ):
             LOGGER.info("Classification minimap2 index is already complete: %s", output_index)
             return
+        stage_log.unlink(missing_ok=True)
         _require_tools(action="build-host-index")
         validate_scratch(
             scratch_root=workflow.scratch_root,
@@ -287,13 +452,28 @@ def build_minimap_index(
                 command=minimap2_index_command(
                     reference=local_reference,
                     output_index=local_index,
+                    index_batch_size_bases=workflow.minimap_index_batch_size_bases,
                 ),
                 log_path=stage_log,
                 timeout_seconds=_internal_timeout_seconds(
                     runtime_minutes=workflow.runtime_minimap2_minutes
                 ),
             )
-            _publish_file(source=local_index, destination=output_index, log_path=stage_log)
+            index_details = validate_single_part_index_log(
+                log_path=stage_log,
+                maximum_reference_bases=workflow.minimap_maximum_reference_bases,
+            )
+            index_size = local_index.stat().st_size
+            if index_size > workflow.minimap_maximum_index_bytes:
+                raise ValueError(
+                    "minimap2 index exceeds the configured hard size limit: "
+                    f"{index_size} > {workflow.minimap_maximum_index_bytes} bytes"
+                )
+            _publish_file(
+                source=local_index,
+                destination=output_index,
+                log_path=stage_log,
+            )
         write_completion(
             completion_path=output_completion,
             signature=signature,
@@ -302,6 +482,9 @@ def build_minimap_index(
                 "action": "build-minimap2-index",
                 "reference": str(workflow.minimap_reference),
                 "reference_sha256": sha256_file(path=workflow.minimap_reference),
+                "index_sha256": sha256_file(path=output_index),
+                "index_size_bytes": output_index.stat().st_size,
+                **index_details,
                 "allocated_memory_mb": workflow.memory_minimap2_mb,
             },
         )
@@ -330,6 +513,7 @@ def host_deplete_batch(
 ) -> None:
     """Remove host reads from every sample after staging the index once."""
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
     _require_tools(action="host-deplete")
     validate_scratch(
         scratch_root=workflow.scratch_root,
@@ -391,6 +575,7 @@ def accept_host_removed_batch(*, config_path: Path, stage_completion: Path) -> N
         ValueError: If the configuration does not declare host-removed inputs.
     """
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
     if workflow.input_read_state != "host_removed":
         raise ValueError("accept_host_removed_batch requires inputs.read_state=host_removed")
     _require_tools(action="accept-host-removed")
@@ -443,16 +628,17 @@ def classify_batch(
 ) -> None:
     """Classify selected samples and always publish a terminal stage record.
 
-    KmerSutra is normally invoked with one sample per Snakemake job so its
-    timeout and failure state are isolated. Kraken2, Metabuli and minimap2 are
-    bundled to stage each large resource only once, but a per-sample failure
-    does not discard successful samples from the same batch. With the default
-    ``continue`` policy, tool, resource, timeout and output-validation failures
-    become explicit status records rather than failed reporting dependencies.
+    The production DAG invokes every method with one sample per job so resource,
+    timeout and failure state are isolated. A multi-sample call remains available
+    for local fallback execution and preserves successful samples when a later
+    sample fails. With the default ``continue`` policy, tool, resource, timeout
+    and output-validation failures become explicit status records rather than
+    failed reporting dependencies.
     """
     if method not in {"kraken2", "metabuli", "minimap2", "kmersutra"}:
         raise ValueError(f"Unsupported classifier method: {method}")
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
     selected_samples = workflow.samples
     if sample_id is not None:
         selected_samples = tuple(
@@ -475,7 +661,12 @@ def classify_batch(
         return
     stage_root = stage_completion.parent
     stage_root.mkdir(parents=True, exist_ok=True)
-    stage_log = stage_root / "resource_staging.log"
+    stage_log = (
+        workflow.output_directory
+        / "workflow_control"
+        / "resource_staging_logs"
+        / f"{method}.{sample_id or 'batch'}.log"
+    )
     successes: list[str] = []
     failures: list[dict[str, str]] = []
     try:
@@ -597,6 +788,12 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     of classifiers succeeds.
     """
     workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
+    truth_records = load_pcr_truth(
+        path=workflow.pcr_truth_path,
+        samples=workflow.samples,
+    )
+    truth_by_sample = {record.sample_id: record for record in truth_records}
     final_root = completion_path.parent
     final_root.mkdir(parents=True, exist_ok=True)
     sample_rows: list[dict[str, Any]] = []
@@ -606,10 +803,34 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     kmersutra_rows: list[dict[str, Any]] = []
     warning_rows: list[dict[str, str]] = []
     for sample in workflow.samples:
-        host_summary = _read_single_tsv(
-            path=_host_result_directory(workflow=workflow, sample=sample)
-            / "host_removal_summary.tsv"
-        )
+        truth = truth_by_sample[sample.sample_id]
+        try:
+            host_summary = _read_single_tsv(
+                path=_host_result_directory(workflow=workflow, sample=sample)
+                / "host_removal_summary.tsv"
+            )
+            if host_summary.get("sample_id") != sample.sample_id:
+                raise ValueError(
+                    "Host summary sample_id does not match the manifest: "
+                    f"{host_summary.get('sample_id')!r} != {sample.sample_id!r}"
+                )
+        except (OSError, ValueError) as error:
+            host_summary = {
+                "sample_id": sample.sample_id,
+                "input_reads": "",
+                "non_host_reads": "",
+                "host_reads_removed": "",
+                "host_fraction": "",
+                "input_read_state": workflow.input_read_state,
+                "host_depletion_performed": "",
+            }
+            warning_rows.append(
+                _report_warning(
+                    sample_id=sample.sample_id,
+                    source="host_preparation",
+                    message=f"Host/input summary is unavailable: {error}",
+                )
+            )
         sample_statuses: dict[str, str] = {}
         for method in METHODS:
             record = _method_status_record(
@@ -619,14 +840,6 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             )
             status_rows.append(record)
             sample_statuses[method] = record["status"]
-        sample_rows.append(
-            {
-                **host_summary,
-                "input_read_state": workflow.input_read_state,
-                "host_depletion_performed": str(workflow.input_read_state == "raw").lower(),
-                **{f"{method}_status": sample_statuses[method] for method in METHODS},
-            }
-        )
         for method in ("kraken2", "metabuli"):
             if sample_statuses[method] != "success":
                 continue
@@ -643,6 +856,13 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                     )
                 )
             except (OSError, ValueError) as error:
+                _invalidate_report_status(
+                    status_rows=status_rows,
+                    sample_statuses=sample_statuses,
+                    sample_id=sample.sample_id,
+                    method=method,
+                    error=error,
+                )
                 warning_rows.append(
                     _report_warning(
                         sample_id=sample.sample_id,
@@ -667,6 +887,13 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                     )
                 )
             except (OSError, ValueError) as error:
+                _invalidate_report_status(
+                    status_rows=status_rows,
+                    sample_statuses=sample_statuses,
+                    sample_id=sample.sample_id,
+                    method="minimap2",
+                    error=error,
+                )
                 warning_rows.append(
                     _report_warning(
                         sample_id=sample.sample_id,
@@ -688,6 +915,13 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                     _read_rows_with_prefix(path=calls, sample_id=sample.sample_id)
                 )
             except (OSError, ValueError) as error:
+                _invalidate_report_status(
+                    status_rows=status_rows,
+                    sample_statuses=sample_statuses,
+                    sample_id=sample.sample_id,
+                    method="kmersutra",
+                    error=error,
+                )
                 warning_rows.append(
                     _report_warning(
                         sample_id=sample.sample_id,
@@ -695,6 +929,16 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                         message=f"Validated completion had unreadable calls: {error}",
                     )
                 )
+        sample_rows.append(
+            {
+                **host_summary,
+                "input_read_state": workflow.input_read_state,
+                "pcr_status": truth.pcr_status,
+                "pcr_species": truth.pcr_species_source_text,
+                "include_in_primary_comparison": str(truth.include_in_primary_comparison).lower(),
+                **{f"{method}_status": sample_statuses[method] for method in METHODS},
+            }
+        )
 
     summary_path = final_root / "sample_summary.tsv"
     status_path = final_root / "classifier_status.tsv"
@@ -704,6 +948,9 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     evidence_path = final_root / "normalised_classifier_evidence.tsv.gz"
     warning_path = final_root / "report_warnings.tsv"
     report_data_path = final_root / "report_data.json"
+    pcr_truth_path = final_root / "pcr_truth.tsv"
+    pcr_concordance_path = final_root / "pcr_concordance.tsv"
+    pcr_method_summary_path = final_root / "pcr_method_summary.tsv"
     _write_tsv(
         path=summary_path,
         rows=sample_rows,
@@ -715,6 +962,9 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "host_fraction",
             "input_read_state",
             "host_depletion_performed",
+            "pcr_status",
+            "pcr_species",
+            "include_in_primary_comparison",
             "kraken2_status",
             "metabuli_status",
             "minimap2_status",
@@ -774,6 +1024,11 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         kmersutra_rows=kmersutra_rows,
         focus_taxa=workflow.report_focus_taxa,
     )
+    concordance_rows, pcr_method_summary_rows = build_pcr_concordance(
+        truth_records=truth_records,
+        status_rows=status_rows,
+        evidence_rows=evidence_rows,
+    )
     _write_tsv(
         path=evidence_path,
         rows=evidence_rows,
@@ -797,6 +1052,57 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         rows=warning_rows,
         fieldnames=("sample_id", "source", "message"),
     )
+    _write_tsv(
+        path=pcr_truth_path,
+        rows=pcr_truth_rows(records=truth_records),
+        fieldnames=(
+            "sample_id",
+            "pcr_status",
+            "pcr_species",
+            "pcr_species_canonical",
+            "pcr_assay_or_source",
+            "pcr_notes",
+            "include_in_primary_comparison",
+        ),
+    )
+    _write_tsv(
+        path=pcr_concordance_path,
+        rows=concordance_rows,
+        fieldnames=(
+            "sample_id",
+            "method",
+            "pcr_status",
+            "pcr_species",
+            "pcr_species_canonical",
+            "include_in_primary_comparison",
+            "classifier_status",
+            "detected_plasmodium_species",
+            "detected_expected_species",
+            "missed_expected_species",
+            "additional_plasmodium_species",
+            "expected_species_count",
+            "detected_expected_species_count",
+            "expected_species_evidence_count",
+            "all_expected_species_detected",
+            "species_exact_match",
+            "comparison_status",
+        ),
+    )
+    _write_tsv(
+        path=pcr_method_summary_path,
+        rows=pcr_method_summary_rows,
+        fieldnames=(
+            "method",
+            "primary_sample_count",
+            "available_sample_count",
+            "unavailable_sample_count",
+            "pcr_positive_available_count",
+            "all_expected_species_detected_count",
+            "exact_species_match_count",
+            "pcr_negative_available_count",
+            "concordant_negative_count",
+        ),
+    )
     write_json_atomic(
         path=report_data_path,
         payload=serialisable_report_data(
@@ -804,6 +1110,9 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             status_rows=status_rows,
             evidence_rows=evidence_rows,
             warning_rows=warning_rows,
+            pcr_truth_rows=pcr_truth_rows(records=truth_records),
+            pcr_concordance_rows=concordance_rows,
+            pcr_method_summary_rows=pcr_method_summary_rows,
         ),
     )
     html_paths = generate_html_reports(
@@ -812,6 +1121,8 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         status_rows=status_rows,
         evidence_rows=evidence_rows,
         warning_rows=warning_rows,
+        pcr_concordance_rows=concordance_rows,
+        pcr_method_summary_rows=pcr_method_summary_rows,
         final_root=final_root,
     )
     report_manifest_path = final_root / "report_manifest.json"
@@ -830,6 +1141,10 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         "kmersutra_species_calls.tsv.gz combines KmerSutra species calls.\n"
         "normalised_classifier_evidence.tsv.gz supports descriptive comparison without "
         "forcing consensus.\n"
+        "pcr_truth.tsv preserves the independent PCR interpretation used for evaluation.\n"
+        "pcr_concordance.tsv compares each method with PCR without converting failures "
+        "into biological non-detections.\n"
+        "pcr_method_summary.tsv reports exact counts and denominators by method.\n"
         "report_data.json is a reusable machine-readable reporting payload.\n"
         "report_warnings.tsv records non-fatal parsing or completeness problems.\n"
         "SHA256SUMS.tsv records final-file checksums.\n",
@@ -844,6 +1159,9 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
         calls_path,
         evidence_path,
         warning_path,
+        pcr_truth_path,
+        pcr_concordance_path,
+        pcr_method_summary_path,
         report_data_path,
         report_manifest_path,
         readme_path,
@@ -895,6 +1213,9 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
                     calls_path,
                     evidence_path,
                     warning_path,
+                    pcr_truth_path,
+                    pcr_concordance_path,
+                    pcr_method_summary_path,
                     report_data_path,
                     report_manifest_path,
                     readme_path,
@@ -909,6 +1230,113 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
 def _report_warning(*, sample_id: str, source: str, message: str) -> dict[str, str]:
     """Create a consistent non-fatal reporting warning row."""
     return {"sample_id": sample_id, "source": source, "message": message}
+
+
+def _invalidate_report_status(
+    *,
+    status_rows: list[dict[str, str]],
+    sample_statuses: dict[str, str],
+    sample_id: str,
+    method: str,
+    error: Exception,
+) -> None:
+    """Prevent an unreadable successful table becoming a non-detection."""
+    sample_statuses[method] = "invalid"
+    matching = [
+        row for row in status_rows if row["sample_id"] == sample_id and row["method"] == method
+    ]
+    if len(matching) != 1:
+        raise RuntimeError(
+            f"Expected one status row for {sample_id}/{method}; found {len(matching)}"
+        )
+    matching[0]["status"] = "invalid"
+    matching[0]["message"] = f"Completed output could not be parsed: {error}"
+
+
+def record_scheduler_failure(
+    *,
+    config_path: Path,
+    method: str,
+    sample_id: str,
+    message: str,
+    status: str = "scheduler_failed",
+) -> None:
+    """Write a terminal classifier record after an outer Slurm failure.
+
+    Args:
+        config_path: Workflow YAML path.
+        method: Classifier branch.
+        sample_id: Logical sample identifier.
+        message: Scheduler or wrapper failure detail.
+        status: Machine-readable terminal status.
+    """
+    if method not in METHODS:
+        raise ValueError(f"Unsupported classifier method: {method}")
+    if not message.strip():
+        raise ValueError("Scheduler failure message must not be blank")
+    workflow = load_workflow_config(config_path=config_path)
+    _validate_deployment_identity(workflow=workflow)
+    matching = [sample for sample in workflow.samples if sample.sample_id == sample_id]
+    if len(matching) != 1:
+        raise ValueError(f"Unknown sample_id for scheduler failure: {sample_id}")
+    error = RuntimeError(message.strip())
+    _write_method_failure(
+        workflow=workflow,
+        sample=matching[0],
+        method=method,
+        error=error,
+        status=status,
+    )
+    stage = (
+        _method_result_directory(
+            workflow=workflow,
+            sample=matching[0],
+            method=method,
+        )
+        / "stage.complete.json"
+    )
+    write_json_atomic(
+        path=stage,
+        payload={
+            "status": status,
+            "completed_at_utc": utc_now(),
+            "stage": method,
+            "sample_count": 1,
+            "successful_samples": [],
+            "failed_samples": [sample_id],
+            "sample_failures": [
+                {"sample_id": sample_id, "status": status, "message": message.strip()}
+            ],
+            "failure_policy": _method_failure_policy(
+                workflow=workflow,
+                method=method,
+            ),
+            "allocated_memory_mb": _method_memory_mb(
+                workflow=workflow,
+                method=method,
+            ),
+            "allocated_runtime_minutes": _method_runtime_minutes(
+                workflow=workflow,
+                method=method,
+            ),
+        },
+    )
+
+
+def _validate_deployment_identity(*, workflow: WorkflowConfig) -> None:
+    """Reject mixed repository copies or an unexpected package version."""
+    actual_root = Path(__file__).resolve().parents[2]
+    expected_root = workflow.expected_repository_root.resolve()
+    if actual_root != expected_root:
+        raise RuntimeError(
+            "Workflow source root does not match deployment.expected_repository_root; "
+            f"actual={actual_root}, expected={expected_root}"
+        )
+    if __version__ != workflow.expected_package_version:
+        raise RuntimeError(
+            "Workflow package version does not match deployment.expected_package_version; "
+            f"actual={__version__}, expected={workflow.expected_package_version}"
+        )
 
 
 def run_snakemake(
@@ -1370,6 +1798,10 @@ def _run_minimap2(
     log_path: Path,
 ) -> None:
     """Map reads to the controlled reference and write filtered taxon summaries."""
+    input_read_count = _validated_non_host_read_count(
+        workflow=workflow,
+        sample=sample,
+    )
     paf_path = output_directory / "alignments.paf.gz"
     run_pipeline(
         commands=[
@@ -1394,6 +1826,7 @@ def _run_minimap2(
         sample_id=sample.sample_id,
         minimum_mapq=workflow.minimap_min_mapq,
         minimum_alignment=workflow.minimap_min_alignment,
+        input_read_count=input_read_count,
     )
     if not workflow.keep_per_read_classifications:
         paf_path.unlink()
@@ -1426,6 +1859,7 @@ def _run_kmersutra(
     calls = output_directory / "species_detection_calls.tsv"
     if not calls.is_file() or calls.stat().st_size == 0:
         raise RuntimeError(f"KmerSutra produced no species calls for {sample.sample_id}")
+    _read_rows_with_prefix(path=calls, sample_id=sample.sample_id)
 
 
 def _handle_per_read_output(
@@ -1566,7 +2000,12 @@ def _validate_classifier_resource(
         raise ValueError(f"Unsupported classifier method: {method}")
 
 
-def _classifier_readiness(*, workflow: WorkflowConfig, method: str) -> dict[str, str]:
+def _classifier_readiness(
+    *,
+    workflow: WorkflowConfig,
+    method: str,
+    required_species: Sequence[str] = (),
+) -> dict[str, str]:
     """Return a non-raising preflight status for one independent classifier."""
     if method == "kmersutra" and not workflow.kmersutra_enabled:
         return {
@@ -1579,11 +2018,21 @@ def _classifier_readiness(*, workflow: WorkflowConfig, method: str) -> dict[str,
         _require_tools(action=f"classify-{method}")
         resource, reference = _classifier_resources(workflow=workflow, method=method)
         if method == "minimap2" and workflow.minimap_index is None:
-            if not workflow.minimap_reference.is_file():
+            if workflow.minimap_genome_config is not None:
+                resource_text = (
+                    "controlled reference and index will be built from "
+                    f"{workflow.minimap_genome_config}"
+                )
+            elif not workflow.minimap_reference.is_file():
                 raise FileNotFoundError(
                     f"minimap2 classification reference is missing: {workflow.minimap_reference}"
                 )
-            resource_text = "index will be built from configured reference"
+            else:
+                validate_required_reference_species(
+                    reference_fasta=workflow.minimap_reference,
+                    required_species=required_species,
+                )
+                resource_text = "index will be built from configured reference"
         else:
             _validate_classifier_resource(
                 workflow=workflow,
@@ -1853,8 +2302,20 @@ def _parse_classifier_report(
 
 def _read_rows_with_prefix(*, path: Path, sample_id: str) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
-    return [{"sample_id": sample_id, "method": "kmersutra", **row} for row in rows]
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"species_name", "call"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            missing = sorted(required.difference(reader.fieldnames or []))
+            raise ValueError(f"KmerSutra calls table is missing columns: {missing}")
+        rows = list(reader)
+    for row in rows:
+        observed_sample = (row.get("sample_id") or "").strip()
+        if observed_sample and observed_sample != sample_id:
+            raise ValueError(
+                "KmerSutra calls sample_id does not match the manifest: "
+                f"{observed_sample!r} != {sample_id!r}"
+            )
+    return [{**row, "sample_id": sample_id, "method": "kmersutra"} for row in rows]
 
 
 def _read_rows_with_method(
@@ -1865,7 +2326,18 @@ def _read_rows_with_method(
 ) -> list[dict[str, Any]]:
     """Read a TSV and enforce its workflow sample and method fields."""
     with path.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {
+            "tax_id",
+            "taxon_name",
+            "best_read_count",
+            "ambiguous_best_read_count",
+            "alignment_count",
+        }
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            missing = sorted(required.difference(reader.fieldnames or []))
+            raise ValueError(f"{method} taxon table is missing columns: {missing}")
+        rows = list(reader)
     return [{**row, "sample_id": sample_id, "method": method} for row in rows]
 
 
@@ -1875,6 +2347,41 @@ def _read_single_tsv(*, path: Path) -> dict[str, str]:
     if len(rows) != 1:
         raise ValueError(f"Expected exactly one data row in {path}")
     return rows[0]
+
+
+def _validated_non_host_read_count(
+    *,
+    workflow: WorkflowConfig,
+    sample: Sample,
+) -> int:
+    """Return the validated read count used to bound minimap2 output.
+
+    Args:
+        workflow: Validated workflow configuration.
+        sample: Logical sample.
+
+    Returns:
+        Non-negative number of reads supplied to every classifier.
+
+    Raises:
+        ValueError: If the host-removal summary is missing or invalid.
+    """
+    summary = _read_single_tsv(
+        path=_host_result_directory(workflow=workflow, sample=sample) / "host_removal_summary.tsv"
+    )
+    if summary.get("sample_id") != sample.sample_id:
+        raise ValueError(
+            "Host summary sample_id does not match the requested sample: "
+            f"{summary.get('sample_id')!r} != {sample.sample_id!r}"
+        )
+    value = summary.get("non_host_reads", "")
+    try:
+        count = int(value)
+    except ValueError as error:
+        raise ValueError(f"Invalid non_host_reads for {sample.sample_id}: {value!r}") from error
+    if count < 0:
+        raise ValueError(f"Negative non_host_reads for {sample.sample_id}: {count}")
+    return count
 
 
 def _merge_fastq_parts(*, input_paths: Sequence[Path], output_path: Path) -> int:

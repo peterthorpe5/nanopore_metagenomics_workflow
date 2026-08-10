@@ -28,6 +28,7 @@ INCOMPLETE_STATUSES = {
     "invalid",
     "missing",
     "partial",
+    "scheduler_failed",
     "skipped",
     "timeout",
     "unavailable",
@@ -106,6 +107,9 @@ def build_normalised_evidence(
         count = _first_number(
             row=row,
             keys=(
+                "n_unique_kmers",
+                "n_exact_hits",
+                "n_hits",
                 "supporting_read_count",
                 "total_supporting_reads",
                 "read_count",
@@ -151,6 +155,8 @@ def generate_html_reports(
     evidence_rows: Sequence[Mapping[str, Any]],
     warning_rows: Sequence[Mapping[str, Any]],
     final_root: Path,
+    pcr_concordance_rows: Sequence[Mapping[str, Any]] = (),
+    pcr_method_summary_rows: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[Path, ...]:
     """Write the complete offline HTML report suite.
 
@@ -161,6 +167,8 @@ def generate_html_reports(
         evidence_rows: Normalised method-specific evidence rows.
         warning_rows: Non-fatal parsing and completeness warnings.
         final_root: Final-results directory.
+        pcr_concordance_rows: Per-sample, per-method PCR comparisons.
+        pcr_method_summary_rows: Exact PCR comparison counts by method.
 
     Returns:
         Every generated HTML path, ordered from the final report onwards.
@@ -195,6 +203,17 @@ def generate_html_reports(
         encoding="utf-8",
     )
     outputs.append(comparison_path)
+
+    pcr_path = report_root / "pcr_comparison.html"
+    pcr_path.write_text(
+        _render_pcr_report(
+            workflow=workflow,
+            concordance_rows=pcr_concordance_rows,
+            method_summary_rows=pcr_method_summary_rows,
+        ),
+        encoding="utf-8",
+    )
+    outputs.append(pcr_path)
 
     for method in METHODS:
         path = classifier_root / f"{method}.html"
@@ -336,6 +355,91 @@ def _render_final_report(
         prefix="",
         active="final",
         footer_note=f"{len(sample_rows)} sample summaries · generated offline",
+    )
+
+
+def _render_pcr_report(
+    *,
+    workflow: WorkflowConfig,
+    concordance_rows: Sequence[Mapping[str, Any]],
+    method_summary_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render independent PCR concordance without forcing classifier consensus."""
+    primary_samples = {
+        str(row.get("sample_id", ""))
+        for row in concordance_rows
+        if _as_bool(row.get("include_in_primary_comparison"))
+    }
+    available = sum(
+        int(_first_number(row=row, keys=("available_sample_count",))) for row in method_summary_rows
+    )
+    expected = sum(
+        int(_first_number(row=row, keys=("primary_sample_count",))) for row in method_summary_rows
+    )
+    body = (
+        _hero(
+            eyebrow="Independent reference",
+            title="PCR concordance by classifier",
+            subtitle=(
+                "Each method is compared separately with the supplied PCR interpretation; "
+                "missing or failed classifier runs remain unavailable, not non-detections."
+            ),
+        )
+        + '<section class="metric-grid">'
+        + _metric("Primary PCR samples", len(primary_samples), "Exact sample denominator")
+        + _metric("Available method results", available, f"of {expected} expected")
+        + _metric(
+            "Excluded PCR records",
+            len(
+                {
+                    str(row.get("sample_id", ""))
+                    for row in concordance_rows
+                    if not _as_bool(row.get("include_in_primary_comparison"))
+                }
+            ),
+            "Retained transparently",
+        )
+        + "</section>"
+        + '<section class="panel"><h2>Method-level exact counts</h2>'
+        + _table(
+            table_id="pcr-method-summary",
+            rows=method_summary_rows,
+            columns=(
+                ("method", "Classifier"),
+                ("primary_sample_count", "Primary samples"),
+                ("available_sample_count", "Available"),
+                ("unavailable_sample_count", "Unavailable"),
+                ("all_expected_species_detected_count", "All expected detected"),
+                ("exact_species_match_count", "Exact species match"),
+            ),
+            empty_message="No PCR summary is available.",
+        )
+        + "</section>"
+        + '<section class="panel"><h2>Per-sample comparison</h2>'
+        + _table(
+            table_id="pcr-concordance",
+            rows=concordance_rows,
+            columns=(
+                ("sample_id", "Sample"),
+                ("method", "Classifier"),
+                ("pcr_species", "PCR species"),
+                ("classifier_status", "Classifier status"),
+                ("detected_expected_species", "Expected detected"),
+                ("missed_expected_species", "Expected missed"),
+                ("additional_plasmodium_species", "Additional Plasmodium"),
+                ("comparison_status", "PCR comparison"),
+            ),
+            empty_message="No PCR concordance rows are available.",
+            status_columns={"classifier_status"},
+        )
+        + "</section>"
+    )
+    return _document(
+        title=f"{workflow.run_id} · PCR concordance",
+        body=body,
+        prefix="",
+        active="pcr",
+        footer_note="Independent PCR comparison · exact counts and denominators",
     )
 
 
@@ -583,6 +687,7 @@ def _navigation(*, prefix: str, active: str) -> str:
     links = [
         ("final", f"{prefix}index.html", "Final report"),
         ("comparison", f"{prefix}comparison.html", "Compare"),
+        ("pcr", f"{prefix}pcr_comparison.html", "PCR"),
         *(
             (method, f"{prefix}classifiers/{method}.html", METHOD_LABELS[method])
             for method in METHODS
@@ -953,19 +1058,19 @@ def _non_negative_number(value: Any) -> float:
 
 def _call_is_positive(*, value: str) -> bool:
     normalised = value.strip().casefold().replace("-", "_").replace(" ", "_")
-    negative = {
-        "",
-        "0",
-        "absent",
-        "false",
-        "failed",
-        "negative",
-        "no",
-        "no_call",
-        "not_detected",
-        "unreportable",
+    positive = {
+        "1",
+        "detected",
+        "mixed_species_present",
+        "positive",
+        "present",
+        "present_high_confidence",
+        "present_in_mixed_sample",
+        "reportable",
+        "true",
+        "yes",
     }
-    return normalised not in negative
+    return normalised in positive
 
 
 def _as_bool(value: Any) -> bool:
@@ -1031,7 +1136,8 @@ border-color:rgba(94,231,223,.45);text-decoration:none}.classifier-card h3{font-
 align-items:center;width:max-content;border-radius:999px;padding:.18rem .55rem;font-weight:780;font-size:.72rem;
 text-transform:uppercase;letter-spacing:.06em;background:rgba(159,178,196,.14);color:var(--muted)}
 .status.success{background:rgba(105,230,166,.14);color:var(--green)}.status.partial,.status.timeout{
-background:rgba(255,202,105,.14);color:var(--amber)}.status.failed,.status.invalid,.status.missing{
+background:rgba(255,202,105,.14);color:var(--amber)}.status.failed,.status.invalid,.status.missing,
+.status.scheduler_failed{
 background:rgba(255,113,133,.14);color:var(--red)}.status.disabled,.status.skipped,.status.unavailable{
 background:rgba(155,123,255,.14);color:#c7b5ff}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;
 background:rgba(13,27,45,.82)}table{width:100%;border-collapse:collapse;min-width:720px}th,td{text-align:left;
@@ -1132,6 +1238,9 @@ def serialisable_report_data(
     status_rows: Sequence[Mapping[str, Any]],
     evidence_rows: Sequence[Mapping[str, Any]],
     warning_rows: Sequence[Mapping[str, Any]],
+    pcr_truth_rows: Sequence[Mapping[str, Any]] = (),
+    pcr_concordance_rows: Sequence[Mapping[str, Any]] = (),
+    pcr_method_summary_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Return JSON-safe report data for independent downstream visualisation."""
     payload = {
@@ -1139,6 +1248,9 @@ def serialisable_report_data(
         "classifier_status": [dict(row) for row in status_rows],
         "normalised_evidence": [dict(row) for row in evidence_rows],
         "warnings": [dict(row) for row in warning_rows],
+        "pcr_truth": [dict(row) for row in pcr_truth_rows],
+        "pcr_concordance": [dict(row) for row in pcr_concordance_rows],
+        "pcr_method_summary": [dict(row) for row in pcr_method_summary_rows],
     }
     # A defensive round-trip prevents unsupported custom values leaking into
     # the durable report-data contract.

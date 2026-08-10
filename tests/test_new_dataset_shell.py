@@ -27,8 +27,8 @@ class TestNewDatasetShell(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn("--action initialise|validate|dry-run|run", completed.stdout)
 
-    def test_initialise_creates_pair_and_refuses_overwrite(self) -> None:
-        """Initialisation creates both templates once and preserves user edits."""
+    def test_initialise_creates_run_templates_and_refuses_overwrite(self) -> None:
+        """Initialisation creates all templates once and preserves user edits."""
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "new_dataset.yaml"
             command = [
@@ -46,9 +46,11 @@ class TestNewDatasetShell(unittest.TestCase):
                 text=True,
             )
             sample_path = config_path.with_suffix(".samples.tsv")
+            pcr_path = config_path.with_suffix(".pcr_truth.tsv")
             self.assertEqual(first.returncode, 0)
             self.assertTrue(config_path.is_file())
             self.assertTrue(sample_path.is_file())
+            self.assertTrue(pcr_path.is_file())
             config_path.write_text("user edit\n", encoding="utf-8")
             second = subprocess.run(
                 command,

@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 from helpers import build_test_project, write_fastq
 from nanopore_realdata.config import load_workflow_config
 from nanopore_realdata.workflow import (
@@ -31,6 +33,7 @@ from nanopore_realdata.workflow import (
     accept_host_removed_batch,
     build_host_index,
     build_minimap_index,
+    build_minimap_reference,
     classify_batch,
     host_deplete_batch,
 )
@@ -56,8 +59,13 @@ class TestStageAdapters(unittest.TestCase):
             completion = output.with_suffix(".complete.json")
 
             def fake_run(*, command, log_path, stdout_path=None, timeout_seconds=None):
-                del log_path, stdout_path, timeout_seconds
+                del stdout_path, timeout_seconds
                 Path(command[command.index("-d") + 1]).write_text("index", encoding="utf-8")
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    "[M::mm_idx_stat] distinct minimizers: 1; total length: 8\n",
+                    encoding="utf-8",
+                )
 
             def fake_publish(*, source, destination, log_path):
                 del log_path
@@ -100,8 +108,13 @@ class TestStageAdapters(unittest.TestCase):
             completion = output.with_suffix(".complete.json")
 
             def fake_run(*, command, log_path, stdout_path=None, timeout_seconds=None):
-                del log_path, stdout_path, timeout_seconds
+                del stdout_path, timeout_seconds
                 Path(command[command.index("-d") + 1]).write_text("index", encoding="utf-8")
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    "[M::mm_idx_stat] distinct minimizers: 1; total length: 8\n",
+                    encoding="utf-8",
+                )
 
             def fake_publish(*, source, destination, log_path):
                 del log_path
@@ -132,6 +145,73 @@ class TestStageAdapters(unittest.TestCase):
             self.assertEqual(payload["reference"], str(workflow.minimap_reference))
             self.assertEqual(len(payload["reference_sha256"]), 64)
             self.assertEqual(staged.call_count, 1)
+
+    def test_controlled_reference_builds_publishes_and_resumes(self) -> None:
+        """KmerSutra genome sources should create one bounded audited FASTA."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root, stage_resources=True)
+            genome = root / "species_alpha.fna"
+            genome.write_text(">contig_1\nACGTACGT\n", encoding="utf-8")
+            genome_config = root / "genomes.tsv"
+            genome_config.write_text(
+                "genome_fasta\tspecies_name\ttaxid\tassembly_accession\trole\tclade\n"
+                f"{genome}\tSpecies alpha\t1\tASM_ALPHA\ttarget_species\ttest\n",
+                encoding="utf-8",
+            )
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["minimap2"]["reference"] = ""
+            config["minimap2"]["genome_config"] = str(genome_config)
+            config_path.write_text(
+                yaml.safe_dump(config, sort_keys=False),
+                encoding="utf-8",
+            )
+            workflow = load_workflow_config(config_path=config_path)
+            reference = workflow.minimap_reference
+            manifest = reference.with_suffix(".manifest.tsv")
+            completion = reference.with_suffix(".complete.json")
+
+            def fake_publish(*, source, destination, log_path):
+                del log_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+
+            with (
+                patch("nanopore_realdata.workflow.validate_scratch"),
+                patch(
+                    "nanopore_realdata.workflow._publish_file",
+                    side_effect=fake_publish,
+                ) as published,
+            ):
+                build_minimap_reference(
+                    config_path=config_path,
+                    output_reference=reference,
+                    output_manifest=manifest,
+                    output_completion=completion,
+                )
+                build_minimap_reference(
+                    config_path=config_path,
+                    output_reference=reference,
+                    output_manifest=manifest,
+                    output_completion=completion,
+                )
+            payload = json.loads(completion.read_text(encoding="utf-8"))
+            with (
+                patch("nanopore_realdata.workflow._require_tools"),
+                patch("nanopore_realdata.workflow._version", return_value="test"),
+                patch("nanopore_realdata.workflow._kmersutra_version", return_value="test"),
+            ):
+                preflight_path = root / "preflight.json"
+                from nanopore_realdata.workflow import preflight
+
+                preflight(config_path=config_path, output_path=preflight_path)
+            preflight_payload = json.loads(preflight_path.read_text(encoding="utf-8"))
+            reference_text = reference.read_text(encoding="utf-8")
+        self.assertEqual(payload["genome_count"], 1)
+        self.assertEqual(payload["total_bases"], 8)
+        self.assertEqual(published.call_count, 2)
+        self.assertIn("taxon_name=Species_alpha", reference_text)
+        self.assertEqual(preflight_payload["resources"]["minimap2_source_genome_count"], 1)
 
     def test_host_batch_stages_index_and_fastq_once(self) -> None:
         """Host input data should be copied to scratch before mapping."""
@@ -575,7 +655,8 @@ class TestToolAdaptersAndHelpers(unittest.TestCase):
                             self.workflow.kmersutra_timeout_minutes * 60,
                         )
                         (output / "species_detection_calls.tsv").write_text(
-                            "calls", encoding="utf-8"
+                            "sample_id\tspecies_name\tcall\nsample_1\tSpecies alpha\tpresent\n",
+                            encoding="utf-8",
                         )
 
                 with (
@@ -616,6 +697,12 @@ class TestToolAdaptersAndHelpers(unittest.TestCase):
         output = self.root / "tool_minimap2"
         output.mkdir()
         target = "kraken:taxid|1|reference_a"
+        host_result = self.workflow.output_directory / "01_host_depletion" / self.sample.sample_id
+        host_result.mkdir(parents=True)
+        (host_result / "host_removal_summary.tsv").write_text(
+            f"sample_id\tnon_host_reads\n{self.sample.sample_id}\t1\n",
+            encoding="utf-8",
+        )
 
         def fake_pipeline(*, commands, log_path, stdout_path=None, timeout_seconds=None):
             del commands, log_path, timeout_seconds

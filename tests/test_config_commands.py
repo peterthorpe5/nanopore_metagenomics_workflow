@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import csv
 from pathlib import Path
 
 import yaml
@@ -108,7 +109,7 @@ class TestConfiguration(unittest.TestCase):
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "schema_version"):
                 load_workflow_config(config_path=config_path)
-            config["schema_version"] = 2
+            config["schema_version"] = 3
             config["kraken2"]["confidence"] = 1.2
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "between"):
@@ -134,6 +135,37 @@ class TestConfiguration(unittest.TestCase):
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "must not contain"):
                 load_workflow_config(config_path=config_path)
+
+    def test_prepared_dundee_manifest_and_masked_reference_are_frozen(self) -> None:
+        """Release inputs should retain all 11 samples and exact PCR exclusions."""
+        repository = Path(__file__).resolve().parents[1]
+        config_path = repository / "config" / "dundee_real_reads_v2_20260810.yaml"
+        samples_path = config_path.with_name("dundee_real_reads_v2_20260810.samples.tsv")
+        pcr_path = config_path.with_name("dundee_real_reads_v2_20260810.pcr_truth.tsv")
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        with samples_path.open("r", encoding="utf-8", newline="") as handle:
+            samples = list(csv.DictReader(handle, delimiter="\t"))
+        with pcr_path.open("r", encoding="utf-8", newline="") as handle:
+            pcr = list(csv.DictReader(handle, delimiter="\t"))
+
+        expected_reference = (
+            "/home/pthorpe001/data/project_back_up_2024/Janet_genome_databases/"
+            "genome_to_use/plas_outgrps_genomes_Hard_MASKED.fasta"
+        )
+        self.assertEqual(config["schema_version"], 3)
+        self.assertEqual(config["minimap2"]["reference"], expected_reference)
+        self.assertEqual(config["minimap2"]["genome_config"], "")
+        self.assertEqual(config["minimap2"]["index"], "")
+        self.assertEqual(len(samples), 11)
+        self.assertEqual(len({row["sample_id"] for row in samples}), 11)
+        self.assertEqual({row["sample_id"] for row in pcr}, {row["sample_id"] for row in samples})
+        included = [row for row in pcr if row["include_in_primary_comparison"] == "true"]
+        excluded = [row for row in pcr if row["include_in_primary_comparison"] == "false"]
+        self.assertEqual(len(included), 10)
+        self.assertEqual([row["sample_id"] for row in excluded], ["MRC1123_WuH001WB"])
+        self.assertTrue(all("P. inui" in row["pcr_species"] for row in included))
+        self.assertEqual(sum("P. cynomolgi" in row["pcr_species"] for row in included), 6)
+        self.assertEqual(config["slurm"]["kmersutra_qos"], "4week")
 
 
 class TestCommands(unittest.TestCase):

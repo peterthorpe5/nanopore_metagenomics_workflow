@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanopore-realdata-workflow"
-version = "0.3.0"
-description = "Failure-tolerant real Nanopore classification with offline multi-classifier HTML reporting"
+version = "0.4.0"
+description = "Detached, failure-tolerant real Nanopore classification with PCR concordance reporting"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 workflow = [
     "snakemake>=9,<10",
-    "snakemake-executor-plugin-slurm==2.4.0",
+    "snakemake-executor-plugin-slurm>=1.9,<2",
 ]
 test = [
     "build>=1.2",

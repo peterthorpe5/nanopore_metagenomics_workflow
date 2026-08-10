@@ -86,6 +86,8 @@ class TestEvidenceNormalisation(unittest.TestCase):
         self.assertFalse(evidence[0]["detected"])
         self.assertFalse(_call_is_positive(value="no_call"))
         self.assertTrue(_call_is_positive(value="reportable"))
+        self.assertFalse(_call_is_positive(value="neighbour_lineage_evidence"))
+        self.assertFalse(_call_is_positive(value="background_candidate_signal"))
 
     def test_comparison_matrix_and_overlap_are_descriptive(self) -> None:
         """Comparison helpers expose method counts and bounded Jaccard values."""
@@ -164,7 +166,7 @@ class TestHtmlReports(unittest.TestCase):
                 encoding="utf-8"
             )
             manifest = json.loads((final_root / "report_manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(paths), 7)
+        self.assertEqual(len(paths), 8)
         self.assertIn("Classifier health", final_html)
         self.assertIn("Agreement without forced consensus", comparison_html)
         self.assertEqual(final_html.count("<section"), final_html.count("</section>"))

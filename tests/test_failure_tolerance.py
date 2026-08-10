@@ -244,12 +244,35 @@ class TestPartialAggregation(unittest.TestCase):
             completion = workflow.output_directory / "03_final" / "workflow.complete.json"
             aggregate_results(config_path=config_path, completion_path=completion)
             warning_text = (completion.parent / "report_warnings.tsv").read_text(encoding="utf-8")
+            status_text = (completion.parent / "classifier_status.tsv").read_text(encoding="utf-8")
             payload = json.loads(completion.read_text(encoding="utf-8"))
             final_report_exists = (completion.parent / "reports" / "index.html").is_file()
         self.assertIn("fewer than six fields", warning_text)
-        self.assertEqual(payload["status"], "partial")
+        self.assertIn("kraken2\tinvalid", status_text)
+        self.assertEqual(payload["status"], "failed")
         self.assertTrue(payload["reports_generated"])
         self.assertTrue(final_report_exists)
+
+    def test_missing_host_summary_still_generates_truthful_report(self) -> None:
+        """Input-preparation failure must not suppress terminal method statuses."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = build_test_project(root=root, input_read_state="host_removed")
+            workflow = load_workflow_config(config_path=config_path)
+            for method in ("kraken2", "metabuli", "minimap2", "kmersutra"):
+                directory = workflow.output_directory / "02_classification" / method / "sample_1"
+                directory.mkdir(parents=True)
+                (directory / "failure.json").write_text(
+                    json.dumps({"status": "unavailable", "error": "missing input"}),
+                    encoding="utf-8",
+                )
+            completion = workflow.output_directory / "03_final" / "workflow.complete.json"
+            aggregate_results(config_path=config_path, completion_path=completion)
+            warnings = (completion.parent / "report_warnings.tsv").read_text(encoding="utf-8")
+            payload = json.loads(completion.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn("host_preparation", warnings)
+        self.assertTrue(payload["reports_generated"])
 
     def test_all_classifiers_failed_still_generates_failure_report(self) -> None:
         """Zero successful classifiers should be an honest report, not no report."""

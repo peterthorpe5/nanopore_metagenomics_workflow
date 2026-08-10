@@ -31,6 +31,7 @@ done
 RUN_DIR="${RESULTS_ROOT%/}/${RUN_LABEL}"
 mkdir -p "${RUN_DIR}/coverage_html"
 cd "${REPO_ROOT}"
+export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 python -m ruff check src tests 2>&1 | tee "${RUN_DIR}/ruff.log"
 python -m ruff format --check src tests 2>&1 | tee "${RUN_DIR}/ruff_format.log"
@@ -44,7 +45,9 @@ python -m build --outdir "${RUN_DIR}/dist" . \
     2>&1 | tee "${RUN_DIR}/package_build.log"
 while IFS= read -r script_path; do
     bash -n "${script_path}"
-done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print | sort)
+done < <(
+    find scripts workflow -type f -name '*.sh' -print | sort
+)
 GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ "${GIT_ROOT}" == "${REPO_ROOT}" ]]; then
     git diff --check 2>&1 | tee "${RUN_DIR}/git_diff_check.log"

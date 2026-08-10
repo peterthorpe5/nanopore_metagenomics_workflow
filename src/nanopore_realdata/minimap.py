@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, TextIO
 
+from nanopore_realdata.reference import species_name_from_header
+
 
 TAXID_PATTERN = re.compile(r"kraken:taxid\|([^|,\s]+)")
-SPECIES_TOKEN_PATTERN = re.compile(r"(?:^|_)([A-Z]\.[A-Za-z0-9._-]+)$")
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,8 @@ def parse_reference_fasta(*, path: Path) -> dict[str, ReferenceRecord]:
             reference_name = header.split()[0]
             if reference_name in records:
                 raise ValueError(f"Duplicate FASTA reference identifier {reference_name!r}: {path}")
-            tax_id = _tax_id(header=header)
+            inferred_species = species_name_from_header(header=header)
+            tax_id = _tax_id(header=header, inferred_species=inferred_species)
             records[reference_name] = ReferenceRecord(
                 reference_name=reference_name,
                 tax_id=tax_id,
@@ -70,6 +72,7 @@ def parse_reference_fasta(*, path: Path) -> dict[str, ReferenceRecord]:
                     reference_name=reference_name,
                     header=header,
                     tax_id=tax_id,
+                    inferred_species=inferred_species,
                 ),
             )
     if not records:
@@ -119,6 +122,7 @@ def summarise_minimap_paf(
     sample_id: str,
     minimum_mapq: int,
     minimum_alignment: int,
+    input_read_count: int,
 ) -> None:
     """Summarise filtered best alignments by reported reference taxon.
 
@@ -133,6 +137,7 @@ def summarise_minimap_paf(
         sample_id: Logical sample identifier.
         minimum_mapq: Minimum mapping quality retained.
         minimum_alignment: Minimum PAF alignment block length retained.
+        input_read_count: Validated number of reads supplied to minimap2.
 
     Raises:
         ValueError: If thresholds, PAF rows or reference identifiers are invalid.
@@ -141,6 +146,8 @@ def summarise_minimap_paf(
         raise ValueError("minimum_mapq must be non-negative")
     if minimum_alignment <= 0:
         raise ValueError("minimum_alignment must be positive")
+    if input_read_count < 0:
+        raise ValueError("input_read_count must be non-negative")
     references = parse_reference_fasta(path=reference_fasta)
     counters: dict[str, dict[str, object]] = {}
     retained_alignment_count = 0
@@ -154,6 +161,11 @@ def summarise_minimap_paf(
         )
     ):
         mapped_read_count += 1
+        if mapped_read_count > input_read_count:
+            raise ValueError(
+                "minimap2 mapped-read groups exceed the validated input-read count; "
+                "the index may be multipart or the PAF may contain duplicated query blocks"
+            )
         retained_alignment_count += len(hits)
         for hit in hits:
             record = _reference_for_hit(hit=hit, references=references, paf_path=paf_path)
@@ -221,6 +233,7 @@ def summarise_minimap_paf(
                 "mapped_read_count": mapped_read_count,
                 "retained_alignment_count": retained_alignment_count,
                 "reported_taxon_count": len(rows),
+                "input_read_count": input_read_count,
                 "min_mapq": minimum_mapq,
                 "min_alignment": minimum_alignment,
             }
@@ -231,6 +244,7 @@ def summarise_minimap_paf(
             "mapped_read_count",
             "retained_alignment_count",
             "reported_taxon_count",
+            "input_read_count",
             "min_mapq",
             "min_alignment",
         ),
@@ -238,13 +252,25 @@ def summarise_minimap_paf(
 
 
 def _query_groups(*, hits: Iterable[PafHit]) -> Iterator[list[PafHit]]:
-    """Yield consecutive PAF records grouped by query identifier."""
+    """Yield query groups while rejecting repeated non-consecutive queries.
+
+    Minimap2 emits the same read block again for each part of a multipart
+    index. Tracking completed query names turns that otherwise silent count
+    inflation into a hard validation failure.
+    """
     group: list[PafHit] = []
     current_query: str | None = None
+    completed_queries: set[str] = set()
     for hit in hits:
         if current_query is not None and hit.query_name != current_query:
             yield group
+            completed_queries.add(current_query)
             group = []
+        if hit.query_name in completed_queries:
+            raise ValueError(
+                "PAF query appears in more than one non-consecutive block: "
+                f"{hit.query_name}; multipart index output is not permitted"
+            )
         group.append(hit)
         current_query = hit.query_name
     if group:
@@ -285,19 +311,26 @@ def _counter(
     )
 
 
-def _tax_id(*, header: str) -> str:
+def _tax_id(*, header: str, inferred_species: str | None) -> str:
     """Extract a taxon identifier, retaining unknown references separately."""
     match = TAXID_PATTERN.search(header)
     if match:
         return match.group(1)
+    if inferred_species:
+        return "name:" + inferred_species.replace(" ", "_")
     return f"unknown:{header.split()[0]}"
 
 
-def _taxon_name(*, reference_name: str, header: str, tax_id: str) -> str:
+def _taxon_name(
+    *,
+    reference_name: str,
+    header: str,
+    tax_id: str,
+    inferred_species: str | None,
+) -> str:
     """Derive a conservative display label without inventing taxonomy."""
-    species_match = SPECIES_TOKEN_PATTERN.search(reference_name)
-    if species_match:
-        return species_match.group(1).replace("_", " ")
+    if inferred_species:
+        return inferred_species
     description = header[len(reference_name) :].strip()
     if description and "kraken:taxid" not in description:
         return description

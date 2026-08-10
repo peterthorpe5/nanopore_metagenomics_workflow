@@ -1,39 +1,31 @@
 schema_version: 3
 
 run:
-  id: nanopore_real_data_v1
-  output_directory: /absolute/path/to/results/nanopore_real_data_v1
+  id: real_reads_classifier_benchmark_v2_20260810
+  output_directory: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/runs/real_reads_classifier_benchmark_v2_20260810
 
 deployment:
-  # Submission is refused when this does not match the installed repository.
-  expected_repository_root: /absolute/path/to/nanopore_metagenomics_workflow_v0_4_0
+  expected_repository_root: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/nanopore_metagenomics_workflow_v0_4_0
   expected_package_version: 0.4.0
   conda_environment: nanopore_realdata_workflow
 
 inputs:
-  samples: /absolute/path/to/samples.tsv
-  pcr_truth: /absolute/path/to/pcr_truth.tsv
-  # Use host_removed when the supplied FASTQs have already been depleted.
-  read_state: raw
+  samples: dundee_real_reads_v2_20260810.samples.tsv
+  pcr_truth: dundee_real_reads_v2_20260810.pcr_truth.tsv
+  read_state: host_removed
 
 host:
-  # Both values may be blank when inputs.read_state is host_removed.
-  reference: /absolute/path/to/host_reference.fasta
-  # Leave blank to build one persistent minimap2 host index.
+  reference: ""
   index: ""
 
 databases:
-  kraken2: /absolute/path/to/kraken2_database
-  metabuli: /absolute/path/to/metabuli_database
-  # May be blank only when kmersutra.enabled is false.
-  kmersutra_panel: /absolute/path/to/species_kmer_panel.tsv.gz
+  kraken2: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/project_back_up_2024/kraken_bact_virus_plasmo_fungal
+  metabuli: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/databases/metabuli/custom_metabuli_db
+  kmersutra_panel: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/databases/kmersutra_db/kmersutra_builds/kmersutra_plasmodium_outgroups_v4_global_candidate_k51_77_101_151_rawontlodbalanced_v046_20260605_150721/species_kmer_panel.tsv.gz
 
 minimap2:
-  # Prefer a KmerSutra genome configuration so both methods use the same
-  # bounded organism set. Set exactly one of genome_config or reference.
-  genome_config: /absolute/path/to/kmersutra_genome_config.tsv
-  reference: ""
-  # Schema v3 always builds and checksums a run-local, single-part index.
+  genome_config: ""
+  reference: /home/pthorpe001/data/project_back_up_2024/Janet_genome_databases/genome_to_use/plas_outgrps_genomes_Hard_MASKED.fasta
   index: ""
   min_mapq: 15
   min_alignment: 500
@@ -43,7 +35,6 @@ minimap2:
   failure_policy: continue
 
 execution:
-  # Dundee compute jobs expose a job-specific, node-local XFS filesystem here.
   scratch_root: /tmp
   stage_resources: true
   minimum_scratch_gb: 150
@@ -51,12 +42,12 @@ execution:
   keep_per_read_classifications: true
 
 resources:
-  host_threads: 16
+  host_threads: 4
   kraken2_threads: 12
   metabuli_threads: 12
   minimap2_threads: 12
   kmersutra_threads: 24
-  host_memory_mb: 64000
+  host_memory_mb: 16000
   kraken2_memory_mb: 96000
   metabuli_memory_mb: 160000
   minimap2_memory_mb: 160000
@@ -68,8 +59,8 @@ resources:
   kmersutra_runtime_minutes: 40320
 
 slurm:
-  account: your_account
-  partition: your_partition
+  account: barton
+  partition: barton
   default_qos: ""
   kmersutra_qos: 4week
   array_concurrency:

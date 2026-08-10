@@ -41,7 +41,7 @@ def build_test_project(
     host_reference.write_text(">host\nACGTACGT\n", encoding="utf-8")
     minimap_reference = root / "classification.fasta"
     minimap_reference.write_text(
-        ">kraken:taxid|1|reference_a Species alpha\nACGTACGT\n",
+        ">kraken:taxid|1|reference_a taxon_name=Species_alpha\nACGTACGT\n",
         encoding="utf-8",
     )
     kraken = root / "kraken"
@@ -54,13 +54,31 @@ def build_test_project(
     panel = root / "species_kmer_panel.tsv.gz"
     with gzip.open(panel, "wt", encoding="utf-8") as handle:
         handle.write("kmer\tk\tspecies_name\nAAAA\t51\tSpecies alpha\n")
+    pcr_truth = root / "pcr_truth.tsv"
+    pcr_truth.write_text(
+        "sample_id\tpcr_status\tpcr_species\tpcr_assay_or_source\t"
+        "pcr_notes\tinclude_in_primary_comparison\n"
+        "sample_1\tpositive\tSpecies alpha\tSynthetic PCR\t"
+        "Synthetic truth\ttrue\n",
+        encoding="utf-8",
+    )
+    repository_root = Path(__file__).resolve().parents[1]
     config = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run": {
             "id": "test_run",
             "output_directory": str(root / "results"),
         },
-        "inputs": {"samples": str(samples), "read_state": input_read_state},
+        "deployment": {
+            "expected_repository_root": str(repository_root),
+            "expected_package_version": "0.4.0",
+            "conda_environment": "test_environment",
+        },
+        "inputs": {
+            "samples": str(samples),
+            "pcr_truth": str(pcr_truth),
+            "read_state": input_read_state,
+        },
         "host": {"reference": str(host_reference), "index": ""},
         "databases": {
             "kraken2": str(kraken),
@@ -72,6 +90,9 @@ def build_test_project(
             "index": "",
             "min_mapq": 15,
             "min_alignment": 500,
+            "maximum_reference_bases": 1000000,
+            "index_batch_size_bases": 1000000,
+            "maximum_index_bytes": 10000000,
         },
         "execution": {
             "scratch_root": str(root),
@@ -109,6 +130,18 @@ def build_test_project(
             "write_parquet_outputs": False,
         },
         "provenance": {"checksum_inputs": False},
+        "slurm": {
+            "account": "test_account",
+            "partition": "test_partition",
+            "default_qos": "",
+            "kmersutra_qos": "test_long",
+            "array_concurrency": {
+                "kraken2": 1,
+                "metabuli": 1,
+                "minimap2": 1,
+                "kmersutra": 1,
+            },
+        },
     }
     config_path = root / "config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")

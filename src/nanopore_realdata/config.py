@@ -12,7 +12,7 @@ from typing import Any, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SAMPLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FASTQ_SUFFIXES = (".fastq", ".fastq.gz", ".fq", ".fq.gz")
 
@@ -36,13 +36,21 @@ class WorkflowConfig:
     run_id: str
     output_directory: Path
     samples_path: Path
+    pcr_truth_path: Path
     input_read_state: str
+    expected_repository_root: Path
+    expected_package_version: str
+    conda_environment: str
     host_reference: Path | None
     host_index: Path | None
     kraken_database: Path
     metabuli_database: Path
     kmersutra_panel: Path | None
     minimap_reference: Path
+    minimap_genome_config: Path | None
+    minimap_maximum_reference_bases: int
+    minimap_index_batch_size_bases: int
+    minimap_maximum_index_bytes: int
     minimap_index: Path | None
     scratch_root: Path
     stage_resources: bool
@@ -83,6 +91,14 @@ class WorkflowConfig:
     report_top_n: int
     report_max_table_rows: int
     checksum_inputs: bool
+    slurm_account: str
+    slurm_partition: str
+    slurm_default_qos: str
+    slurm_kmersutra_qos: str
+    slurm_kraken2_concurrency: int
+    slurm_metabuli_concurrency: int
+    slurm_minimap2_concurrency: int
+    slurm_kmersutra_concurrency: int
     samples: tuple[Sample, ...]
 
 
@@ -111,6 +127,7 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     base = resolved_config.parent
     run = _mapping(raw, "run")
     inputs = _mapping(raw, "inputs")
+    deployment = _mapping(raw, "deployment")
     host = _mapping(raw, "host")
     databases = _mapping(raw, "databases")
     execution = _mapping(raw, "execution")
@@ -119,6 +136,8 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     metabuli = _mapping(raw, "metabuli")
     kmersutra = _mapping(raw, "kmersutra")
     provenance = _mapping(raw, "provenance")
+    slurm = _mapping(raw, "slurm")
+    slurm_concurrency = _mapping(slurm, "array_concurrency")
     reporting = _optional_mapping(raw, "reporting")
     kmersutra_enabled = _boolean(kmersutra, "enabled")
     minimap2 = _mapping(raw, "minimap2")
@@ -126,6 +145,7 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     run_id = _identifier(run, "id")
     output_directory = _path(run, "output_directory", base=base, must_exist=False)
     samples_path = _path(inputs, "samples", base=base, must_exist=True)
+    pcr_truth_path = _path(inputs, "pcr_truth", base=base, must_exist=True)
     input_read_state = _choice(
         inputs,
         "read_state",
@@ -133,6 +153,17 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
     )
     host_reference = _optional_path(host, "reference", base=base, must_exist=True)
     host_index = _optional_path(host, "index", base=base, must_exist=True)
+    expected_repository_root = _path(
+        deployment,
+        "expected_repository_root",
+        base=base,
+        must_exist=False,
+    )
+    expected_package_version = _non_empty_string(
+        deployment,
+        "expected_package_version",
+    )
+    conda_environment = _identifier(deployment, "conda_environment")
     # Classifier resources are deliberately resolved without requiring them to
     # exist at configuration-load time. Their readiness is assessed per branch
     # during preflight so one unavailable classifier cannot suppress all other
@@ -145,11 +176,24 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         base=base,
         must_exist=False,
     )
-    minimap_reference = _path(
+    minimap_reference_source = _optional_path(
         minimap2,
         "reference",
         base=base,
         must_exist=False,
+    )
+    minimap_genome_config = _optional_path(
+        minimap2,
+        "genome_config",
+        base=base,
+        must_exist=True,
+    )
+    if (minimap_reference_source is None) == (minimap_genome_config is None):
+        raise ValueError("Configure exactly one of minimap2.reference or minimap2.genome_config")
+    minimap_reference = (
+        minimap_reference_source
+        if minimap_reference_source is not None
+        else output_directory / "00_preflight" / "controlled_minimap_reference.fa"
     )
     minimap_index = _optional_path(
         minimap2,
@@ -157,6 +201,11 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         base=base,
         must_exist=False,
     )
+    if minimap_index is not None:
+        raise ValueError(
+            "Prebuilt minimap2.index values are not accepted in schema v3; "
+            "the workflow must build and checksum a single-part index"
+        )
     scratch_root = _path(execution, "scratch_root", base=base, must_exist=True)
 
     if kraken_database.exists() and not kraken_database.is_dir():
@@ -175,10 +224,15 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         raise ValueError(f"Host reference must be a file: {host_reference}")
     if minimap_reference.exists() and not minimap_reference.is_file():
         raise ValueError(f"Classification minimap2 reference must be a file: {minimap_reference}")
-    if minimap_index is not None and minimap_index.exists() and not minimap_index.is_file():
-        raise ValueError(f"Classification minimap2 index must be a file: {minimap_index}")
     if not scratch_root.is_dir():
         raise ValueError(f"Scratch root must be a directory: {scratch_root}")
+    maximum_reference_bases = _positive_int(minimap2, "maximum_reference_bases")
+    index_batch_size_bases = _positive_int(minimap2, "index_batch_size_bases")
+    if index_batch_size_bases < maximum_reference_bases:
+        raise ValueError(
+            "minimap2.index_batch_size_bases must be at least as large as "
+            "minimap2.maximum_reference_bases to guarantee a single index part"
+        )
 
     samples = load_samples(samples_path=samples_path)
     workflow = WorkflowConfig(
@@ -186,13 +240,24 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
         run_id=run_id,
         output_directory=output_directory,
         samples_path=samples_path,
+        pcr_truth_path=pcr_truth_path,
         input_read_state=input_read_state,
+        expected_repository_root=expected_repository_root,
+        expected_package_version=expected_package_version,
+        conda_environment=conda_environment,
         host_reference=host_reference,
         host_index=host_index,
         kraken_database=kraken_database,
         metabuli_database=metabuli_database,
         kmersutra_panel=kmersutra_panel,
         minimap_reference=minimap_reference,
+        minimap_genome_config=minimap_genome_config,
+        minimap_maximum_reference_bases=maximum_reference_bases,
+        minimap_index_batch_size_bases=index_batch_size_bases,
+        minimap_maximum_index_bytes=_positive_int(
+            minimap2,
+            "maximum_index_bytes",
+        ),
         minimap_index=minimap_index,
         scratch_root=scratch_root,
         stage_resources=_boolean(execution, "stage_resources"),
@@ -281,6 +346,14 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
             default=5000,
         ),
         checksum_inputs=_boolean(provenance, "checksum_inputs"),
+        slurm_account=_identifier(slurm, "account"),
+        slurm_partition=_identifier(slurm, "partition"),
+        slurm_default_qos=_optional_identifier(slurm, "default_qos"),
+        slurm_kmersutra_qos=_identifier(slurm, "kmersutra_qos"),
+        slurm_kraken2_concurrency=_positive_int(slurm_concurrency, "kraken2"),
+        slurm_metabuli_concurrency=_positive_int(slurm_concurrency, "metabuli"),
+        slurm_minimap2_concurrency=_positive_int(slurm_concurrency, "minimap2"),
+        slurm_kmersutra_concurrency=_positive_int(slurm_concurrency, "kmersutra"),
         samples=samples,
     )
     _validate_workflow_paths(workflow=workflow)
@@ -362,11 +435,15 @@ def _validate_workflow_paths(*, workflow: WorkflowConfig) -> None:
     """Reject configurations that could overwrite source data or databases."""
     protected = {
         workflow.samples_path,
+        workflow.pcr_truth_path,
         workflow.kraken_database,
         workflow.metabuli_database,
-        workflow.minimap_reference,
         *(sample.fastq_paths for sample in workflow.samples),
     }
+    if workflow.minimap_genome_config is None:
+        protected.add(workflow.minimap_reference)
+    else:
+        protected.add(workflow.minimap_genome_config)
     if workflow.host_reference is not None:
         protected.add(workflow.host_reference)
     if workflow.host_index is not None:
@@ -419,6 +496,27 @@ def _identifier(mapping: Mapping[str, Any], key: str) -> str:
     value = str(mapping.get(key, "")).strip()
     if not SAMPLE_ID_PATTERN.fullmatch(value):
         raise ValueError(f"{key} must be a filesystem-safe identifier")
+    return value
+
+
+def _non_empty_string(mapping: Mapping[str, Any], key: str) -> str:
+    """Return a required non-empty configuration string."""
+    value = str(mapping.get(key, "")).strip()
+    if not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
+def _optional_string(mapping: Mapping[str, Any], key: str) -> str:
+    """Return a stripped optional configuration string."""
+    return str(mapping.get(key, "")).strip()
+
+
+def _optional_identifier(mapping: Mapping[str, Any], key: str) -> str:
+    """Return an optional scheduler-safe identifier."""
+    value = _optional_string(mapping, key)
+    if value and not SAMPLE_ID_PATTERN.fullmatch(value):
+        raise ValueError(f"{key} must be a scheduler-safe identifier")
     return value
 
 

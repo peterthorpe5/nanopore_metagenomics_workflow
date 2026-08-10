@@ -1,4 +1,4 @@
-"""Snakemake DAG for real Oxford Nanopore sample classification."""
+"""Per-sample Snakemake DAG for real Oxford Nanopore classification."""
 
 from pathlib import Path
 
@@ -8,6 +8,7 @@ from nanopore_realdata.workflow import (
     aggregate_results,
     build_host_index,
     build_minimap_index,
+    build_minimap_reference,
     classify_batch,
     host_deplete_batch,
     preflight,
@@ -22,10 +23,14 @@ SAMPLE_IDS = [sample.sample_id for sample in WORKFLOW.samples]
 PREFLIGHT = OUTPUT_ROOT / "00_preflight" / "preflight.json"
 HOST_INDEX = WORKFLOW.host_index or OUTPUT_ROOT / "00_preflight" / "host_reference.mmi"
 HOST_INDEX_COMPLETION = OUTPUT_ROOT / "00_preflight" / "host_index.complete.json"
-MINIMAP_INDEX = (
-    WORKFLOW.minimap_index
-    or OUTPUT_ROOT / "00_preflight" / "classification_reference.mmi"
+MINIMAP_REFERENCE = WORKFLOW.minimap_reference
+MINIMAP_REFERENCE_MANIFEST = (
+    OUTPUT_ROOT / "00_preflight" / "controlled_minimap_reference.manifest.tsv"
 )
+MINIMAP_REFERENCE_COMPLETION = (
+    OUTPUT_ROOT / "00_preflight" / "controlled_minimap_reference.complete.json"
+)
+MINIMAP_INDEX = OUTPUT_ROOT / "00_preflight" / "classification_reference.mmi"
 MINIMAP_INDEX_COMPLETION = (
     OUTPUT_ROOT / "00_preflight" / "classification_reference_index.complete.json"
 )
@@ -39,17 +44,22 @@ HOST_SUMMARIES = [
 ]
 HOST_STAGE = OUTPUT_ROOT / "01_host_depletion" / "stage.complete.json"
 
-KRAKEN_STAGE = OUTPUT_ROOT / "02_classification" / "kraken2" / "stage.complete.json"
-METABULI_STAGE = OUTPUT_ROOT / "02_classification" / "metabuli" / "stage.complete.json"
-MINIMAP_STAGE = OUTPUT_ROOT / "02_classification" / "minimap2" / "stage.complete.json"
-KMERSUTRA_STAGES = [
-    OUTPUT_ROOT
-    / "02_classification"
-    / "kmersutra"
-    / sample_id
-    / "stage.complete.json"
-    for sample_id in SAMPLE_IDS
-]
+
+def method_stage(method, sample_id):
+    """Return one per-sample classifier terminal stage path."""
+    return (
+        OUTPUT_ROOT
+        / "02_classification"
+        / method
+        / sample_id
+        / "stage.complete.json"
+    )
+
+
+METHOD_STAGES = {
+    method: [method_stage(method, sample_id) for sample_id in SAMPLE_IDS]
+    for method in ("kraken2", "metabuli", "minimap2", "kmersutra")
+}
 
 FINAL_ROOT = OUTPUT_ROOT / "03_final"
 FINAL_COMPLETION = FINAL_ROOT / "workflow.complete.json"
@@ -68,6 +78,9 @@ FINAL_OUTPUTS = [
     FINAL_ROOT / "minimap2_taxon_reports.tsv.gz",
     FINAL_ROOT / "kmersutra_species_calls.tsv.gz",
     FINAL_ROOT / "normalised_classifier_evidence.tsv.gz",
+    FINAL_ROOT / "pcr_truth.tsv",
+    FINAL_ROOT / "pcr_concordance.tsv",
+    FINAL_ROOT / "pcr_method_summary.tsv",
     FINAL_ROOT / "report_warnings.tsv",
     FINAL_ROOT / "report_data.json",
     FINAL_ROOT / "report_manifest.json",
@@ -75,6 +88,7 @@ FINAL_OUTPUTS = [
     FINAL_ROOT / "SHA256SUMS.tsv",
     FINAL_ROOT / "reports" / "index.html",
     FINAL_ROOT / "reports" / "comparison.html",
+    FINAL_ROOT / "reports" / "pcr_comparison.html",
     *CLASSIFIER_REPORTS,
     *SAMPLE_REPORTS,
     FINAL_COMPLETION,
@@ -90,17 +104,23 @@ rule preflight:
     input:
         config=str(CONFIG_PATH),
         samples=str(WORKFLOW.samples_path),
+        pcr_truth=str(WORKFLOW.pcr_truth_path),
         host_reference=(
             [str(WORKFLOW.host_reference)]
             if WORKFLOW.host_reference is not None
             else []
         ),
+        minimap_source=(
+            [str(WORKFLOW.minimap_genome_config)]
+            if WORKFLOW.minimap_genome_config is not None
+            else [str(WORKFLOW.minimap_reference)]
+        ),
         fastqs=[str(path) for sample in WORKFLOW.samples for path in sample.fastq_paths],
     output:
         str(PREFLIGHT)
     resources:
-        mem_mb=2048,
-        runtime=30,
+        mem_mb=4096,
+        runtime=60,
     run:
         preflight(config_path=Path(input.config), output_path=Path(output[0]))
 
@@ -169,7 +189,7 @@ else:
             stage=str(HOST_STAGE),
         threads: 1
         resources:
-            mem_mb=4096,
+            mem_mb=WORKFLOW.memory_host_mb,
             runtime=WORKFLOW.runtime_host_minutes,
             database_stage=1,
         run:
@@ -179,38 +199,65 @@ else:
             )
 
 
-if WORKFLOW.minimap_index is None:
-    rule build_minimap_index:
+if WORKFLOW.minimap_genome_config is not None:
+    rule build_minimap_reference:
         input:
             config=str(CONFIG_PATH),
             preflight=str(PREFLIGHT),
+            genome_config=str(WORKFLOW.minimap_genome_config),
+            pcr_truth=str(WORKFLOW.pcr_truth_path),
         output:
-            completion=str(MINIMAP_INDEX_COMPLETION),
+            reference=str(MINIMAP_REFERENCE),
+            manifest=str(MINIMAP_REFERENCE_MANIFEST),
+            completion=str(MINIMAP_REFERENCE_COMPLETION),
         threads: WORKFLOW.threads_minimap2
         resources:
             mem_mb=WORKFLOW.memory_minimap2_mb,
             runtime=WORKFLOW.runtime_minimap2_minutes,
-            database_stage=1,
         run:
-            build_minimap_index(
+            build_minimap_reference(
                 config_path=Path(input.config),
-                output_index=Path(MINIMAP_INDEX),
+                output_reference=Path(output.reference),
+                output_manifest=Path(output.manifest),
                 output_completion=Path(output.completion),
             )
 
 
-MINIMAP_READY = (
-    MINIMAP_INDEX_COMPLETION if WORKFLOW.minimap_index is None else PREFLIGHT
+MINIMAP_REFERENCE_READY = (
+    MINIMAP_REFERENCE_COMPLETION
+    if WORKFLOW.minimap_genome_config is not None
+    else PREFLIGHT
 )
+
+
+rule build_minimap_index:
+    input:
+        config=str(CONFIG_PATH),
+        reference_ready=str(MINIMAP_REFERENCE_READY),
+        reference=str(MINIMAP_REFERENCE),
+    output:
+        index=str(MINIMAP_INDEX),
+        completion=str(MINIMAP_INDEX_COMPLETION),
+    threads: WORKFLOW.threads_minimap2
+    resources:
+        mem_mb=WORKFLOW.memory_minimap2_mb,
+        runtime=WORKFLOW.runtime_minimap2_minutes,
+        database_stage=1,
+    run:
+        build_minimap_index(
+            config_path=Path(input.config),
+            output_index=Path(output.index),
+            output_completion=Path(output.completion),
+        )
 
 
 rule classify_kraken2:
     input:
         config=str(CONFIG_PATH),
         host_stage=str(HOST_STAGE),
-        fastqs=[str(path) for path in HOST_FASTQS],
+        fastq=str(OUTPUT_ROOT / "01_host_depletion" / "{sample_id}" / "non_host.fastq.gz"),
     output:
-        stage=str(KRAKEN_STAGE),
+        stage=str(OUTPUT_ROOT / "02_classification" / "kraken2" / "{sample_id}" / "stage.complete.json"),
     threads: WORKFLOW.threads_kraken2
     resources:
         mem_mb=WORKFLOW.memory_kraken2_mb,
@@ -221,6 +268,7 @@ rule classify_kraken2:
             config_path=Path(input.config),
             method="kraken2",
             stage_completion=Path(output.stage),
+            sample_id=str(wildcards.sample_id),
         )
 
 
@@ -228,9 +276,9 @@ rule classify_metabuli:
     input:
         config=str(CONFIG_PATH),
         host_stage=str(HOST_STAGE),
-        fastqs=[str(path) for path in HOST_FASTQS],
+        fastq=str(OUTPUT_ROOT / "01_host_depletion" / "{sample_id}" / "non_host.fastq.gz"),
     output:
-        stage=str(METABULI_STAGE),
+        stage=str(OUTPUT_ROOT / "02_classification" / "metabuli" / "{sample_id}" / "stage.complete.json"),
     threads: WORKFLOW.threads_metabuli
     resources:
         mem_mb=WORKFLOW.memory_metabuli_mb,
@@ -241,6 +289,7 @@ rule classify_metabuli:
             config_path=Path(input.config),
             method="metabuli",
             stage_completion=Path(output.stage),
+            sample_id=str(wildcards.sample_id),
         )
 
 
@@ -248,10 +297,10 @@ rule classify_minimap2:
     input:
         config=str(CONFIG_PATH),
         host_stage=str(HOST_STAGE),
-        index_ready=str(MINIMAP_READY),
-        fastqs=[str(path) for path in HOST_FASTQS],
+        index_ready=str(MINIMAP_INDEX_COMPLETION),
+        fastq=str(OUTPUT_ROOT / "01_host_depletion" / "{sample_id}" / "non_host.fastq.gz"),
     output:
-        stage=str(MINIMAP_STAGE),
+        stage=str(OUTPUT_ROOT / "02_classification" / "minimap2" / "{sample_id}" / "stage.complete.json"),
     threads: WORKFLOW.threads_minimap2
     resources:
         mem_mb=WORKFLOW.memory_minimap2_mb,
@@ -262,24 +311,17 @@ rule classify_minimap2:
             config_path=Path(input.config),
             method="minimap2",
             stage_completion=Path(output.stage),
+            sample_id=str(wildcards.sample_id),
         )
 
 
 rule classify_kmersutra:
     input:
         config=str(CONFIG_PATH),
-        kraken_stage=str(KRAKEN_STAGE),
-        metabuli_stage=str(METABULI_STAGE),
-        minimap_stage=str(MINIMAP_STAGE),
+        host_stage=str(HOST_STAGE),
         fastq=str(OUTPUT_ROOT / "01_host_depletion" / "{sample_id}" / "non_host.fastq.gz"),
     output:
-        stage=str(
-            OUTPUT_ROOT
-            / "02_classification"
-            / "kmersutra"
-            / "{sample_id}"
-            / "stage.complete.json"
-        ),
+        stage=str(OUTPUT_ROOT / "02_classification" / "kmersutra" / "{sample_id}" / "stage.complete.json"),
     threads: WORKFLOW.threads_kmersutra
     resources:
         mem_mb=WORKFLOW.memory_kmersutra_mb,
@@ -298,15 +340,15 @@ rule aggregate:
     input:
         config=str(CONFIG_PATH),
         host_summaries=[str(path) for path in HOST_SUMMARIES],
-        kraken_stage=str(KRAKEN_STAGE),
-        metabuli_stage=str(METABULI_STAGE),
-        minimap_stage=str(MINIMAP_STAGE),
-        kmersutra_stages=[str(path) for path in KMERSUTRA_STAGES],
+        kraken_stages=[str(path) for path in METHOD_STAGES["kraken2"]],
+        metabuli_stages=[str(path) for path in METHOD_STAGES["metabuli"]],
+        minimap_stages=[str(path) for path in METHOD_STAGES["minimap2"]],
+        kmersutra_stages=[str(path) for path in METHOD_STAGES["kmersutra"]],
     output:
         [str(path) for path in FINAL_OUTPUTS]
     resources:
-        mem_mb=4096,
-        runtime=60,
+        mem_mb=8192,
+        runtime=180,
     run:
         aggregate_results(
             config_path=Path(input.config),

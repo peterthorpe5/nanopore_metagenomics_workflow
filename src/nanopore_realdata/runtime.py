@@ -132,7 +132,27 @@ def completion_is_valid(
         return False
     if payload.get("status") != "success" or payload.get("signature") != signature:
         return False
-    return all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    declared = payload.get("outputs")
+    if not isinstance(declared, list) or len(declared) != len(outputs):
+        return False
+    expected = {
+        str(path): path.stat().st_size
+        for path in outputs
+        if path.is_file() and path.stat().st_size > 0
+    }
+    if len(expected) != len(outputs):
+        return False
+    observed: dict[str, int] = {}
+    for record in declared:
+        if not isinstance(record, Mapping):
+            return False
+        path_text = str(record.get("path", ""))
+        try:
+            size = int(record.get("size_bytes", -1))
+        except (TypeError, ValueError):
+            return False
+        observed[path_text] = size
+    return observed == expected
 
 
 def write_completion(

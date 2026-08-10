@@ -56,6 +56,14 @@ class TestRuntime(unittest.TestCase):
                     outputs=[output],
                 )
             )
+            output.write_text("changed size\n", encoding="utf-8")
+            self.assertFalse(
+                completion_is_valid(
+                    completion_path=completion,
+                    signature="abc",
+                    outputs=[output],
+                )
+            )
             output.write_text("", encoding="utf-8")
             self.assertFalse(
                 completion_is_valid(

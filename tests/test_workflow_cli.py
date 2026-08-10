@@ -273,16 +273,23 @@ class TestCliAndSnakemake(unittest.TestCase):
         self.assertEqual(args.action, "validate")
         self.assertEqual(args.cores, "all")
 
-    def test_cli_validate_and_action_specific_errors(self) -> None:
-        """CLI validation succeeds and missing named outputs fail through argparse."""
+    def test_cli_validate_and_preflight_defaults(self) -> None:
+        """CLI validation succeeds and preflight uses its configured default path."""
         with tempfile.TemporaryDirectory() as temporary:
             config_path = build_test_project(root=Path(temporary))
             self.assertEqual(
                 main(["--action", "validate", "--config", str(config_path)]),
                 0,
             )
-            with self.assertRaises(SystemExit):
-                main(["--action", "preflight", "--config", str(config_path)])
+            with patch("nanopore_realdata.cli.preflight") as preflight_action:
+                self.assertEqual(
+                    main(["--action", "preflight", "--config", str(config_path)]),
+                    0,
+                )
+            self.assertEqual(
+                preflight_action.call_args.kwargs["output_path"],
+                Path(temporary) / "results" / "00_preflight" / "preflight.json",
+            )
 
     def test_run_snakemake_serialises_database_staging(self) -> None:
         """The launcher must always cap large database staging at one job."""
@@ -333,11 +340,11 @@ class TestCliAndSnakemake(unittest.TestCase):
                 Path(__file__).resolve().parents[1] / "src" / "nanopore_realdata" / "Snakefile"
             )
             snakefile_text = snakefile.read_text(encoding="utf-8")
-            minimap_rule = snakefile_text.split("if WORKFLOW.minimap_index is None:", maxsplit=1)[
-                1
-            ].split("MINIMAP_READY", maxsplit=1)[0]
-            self.assertIn("output_index=Path(MINIMAP_INDEX)", minimap_rule)
-            self.assertNotIn("output_index=Path(output.index)", minimap_rule)
+            self.assertIn("rule classify_kmersutra:", snakefile_text)
+            self.assertIn('method="kmersutra"', snakefile_text)
+            kmersutra_rule = snakefile_text.split("rule classify_kmersutra:", maxsplit=1)[1]
+            kmersutra_rule = kmersutra_rule.split("rule aggregate:", maxsplit=1)[0]
+            self.assertNotIn("MINIMAP_INDEX_COMPLETION", kmersutra_rule)
             command = [
                 str(snakemake),
                 "--snakefile",

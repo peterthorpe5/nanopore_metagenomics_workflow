@@ -1,0 +1,12 @@
+sample_id	pcr_status	pcr_species	pcr_assay_or_source	pcr_notes	include_in_primary_comparison
+MRC0123_AmM001WB	positive	P. inui	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0223_AmM002WB	positive	P. inui; P. cynomolgi	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0323_BiM003WB	positive	P. inui; P. cynomolgi	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0423_BiM001WB	positive	P. inui	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0523_AmM006WB	positive	P. inui; P. cynomolgi	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0623_BiM002WB	positive	P. inui	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0723_AmM007WB	positive	P. inui; P. cynomolgi	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0823_BiM004WB	positive	P. inui; P. cynomolgi	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC0923_BiM005WB	positive	P. inui	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC1023_AmM008WB	positive	P. inui; P. cynomolgi	Table Macaque seq summary incl V2 cleaning.xlsx; Plasmodium spp. PCR column		true
+MRC1123_WuH001WB	unknown		Not present in supplied PCR workbook	PCR interpretation not supplied; retained transparently but excluded from primary comparison	false

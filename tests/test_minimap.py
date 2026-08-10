@@ -48,6 +48,25 @@ class TestReferenceAndPafParsing(unittest.TestCase):
             "unknown:reference_B.species_token",
         )
 
+    def test_masked_reference_names_group_contigs_by_species(self) -> None:
+        """Legacy masked headers without taxids should not fragment species counts."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "masked.fa"
+            path.write_text(
+                ">GCF_000524495.1_Plas_inui_contig_1\nACGT\n"
+                ">contig_2 [organism=Plasmodium inui]\nACGT\n",
+                encoding="utf-8",
+            )
+            records = parse_reference_fasta(path=path)
+        self.assertEqual(
+            {record.taxon_name for record in records.values()},
+            {"Plasmodium inui"},
+        )
+        self.assertEqual(
+            {record.tax_id for record in records.values()},
+            {"name:Plasmodium_inui"},
+        )
+
     def test_reference_parser_rejects_empty_blank_and_duplicate_headers(self) -> None:
         """Invalid reference inventories should fail before minimap2 reporting."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -161,6 +180,7 @@ class TestMinimapSummarisation(unittest.TestCase):
                 taxon_report_path=report,
                 mapping_summary_path=summary,
                 sample_id="sample_1",
+                input_read_count=3,
                 minimum_mapq=15,
                 minimum_alignment=500,
             )
@@ -198,6 +218,7 @@ class TestMinimapSummarisation(unittest.TestCase):
                 "taxon_report_path": root / "report.tsv",
                 "mapping_summary_path": root / "summary.tsv",
                 "sample_id": "sample",
+                "input_read_count": 1,
                 "minimum_mapq": 15,
                 "minimum_alignment": 500,
             }
@@ -207,6 +228,70 @@ class TestMinimapSummarisation(unittest.TestCase):
                 summarise_minimap_paf(**{**arguments, "minimum_mapq": -1})
             with self.assertRaisesRegex(ValueError, "positive"):
                 summarise_minimap_paf(**{**arguments, "minimum_alignment": 0})
+
+    def test_summary_rejects_repeated_query_blocks_and_impossible_counts(self) -> None:
+        """Multipart signatures and mapped counts above input are hard failures."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "reference.fa"
+            reference.write_text(">ref_a\nACGT\n", encoding="utf-8")
+            paf = root / "alignments.paf"
+            paf.write_text(
+                paf_row(
+                    query="read_1",
+                    target="ref_a",
+                    matches=900,
+                    block_length=900,
+                    mapq=60,
+                )
+                + paf_row(
+                    query="read_2",
+                    target="ref_a",
+                    matches=900,
+                    block_length=900,
+                    mapq=60,
+                )
+                + paf_row(
+                    query="read_1",
+                    target="ref_a",
+                    matches=900,
+                    block_length=900,
+                    mapq=60,
+                ),
+                encoding="utf-8",
+            )
+            arguments = {
+                "paf_path": paf,
+                "reference_fasta": reference,
+                "taxon_report_path": root / "report.tsv",
+                "mapping_summary_path": root / "summary.tsv",
+                "sample_id": "sample",
+                "minimum_mapq": 15,
+                "minimum_alignment": 500,
+                "input_read_count": 3,
+            }
+            with self.assertRaisesRegex(ValueError, "non-consecutive block"):
+                summarise_minimap_paf(**arguments)
+
+            paf.write_text(
+                paf_row(
+                    query="read_1",
+                    target="ref_a",
+                    matches=900,
+                    block_length=900,
+                    mapq=60,
+                )
+                + paf_row(
+                    query="read_2",
+                    target="ref_a",
+                    matches=900,
+                    block_length=900,
+                    mapq=60,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "exceed"):
+                summarise_minimap_paf(**{**arguments, "input_read_count": 1})
 
 
 if __name__ == "__main__":
