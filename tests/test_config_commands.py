@@ -174,6 +174,8 @@ class TestConfiguration(unittest.TestCase):
             config["deployment"]["expected_repository_root"],
             expected_repository,
         )
+        self.assertEqual(config["deployment"]["expected_package_version"], "0.4.2")
+        self.assertEqual(config["resources"]["kraken2_memory_mb"], 409600)
         self.assertEqual(config["minimap2"]["reference"], expected_reference)
         self.assertEqual(
             config["minimap2"]["required_species"],

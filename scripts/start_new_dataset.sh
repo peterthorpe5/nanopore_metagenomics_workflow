@@ -20,6 +20,8 @@ usage() {
         "                   --with-pcr-truth" \
         "  --profile PATH   Snakemake profile for dry-run/run" \
         "  --jobs INT       Maximum jobs (default: 10)" \
+        "  --retry-method NAME  With plan-slurm or submit-slurm, retry only" \
+        "                       this classifier and then aggregate; repeatable" \
         "  --help" \
         "" \
         "Examples:" \
@@ -38,6 +40,7 @@ PCR_TRUTH_PATH=""
 WITH_PCR_TRUTH="false"
 PROFILE_PATH=""
 JOBS="10"
+RETRY_METHODS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -76,6 +79,22 @@ while [[ $# -gt 0 ]]; do
             JOBS="$2"
             shift 2
             ;;
+        --retry-method)
+            [[ $# -ge 2 ]] || {
+                printf 'ERROR: --retry-method requires a classifier name\n' >&2
+                exit 2
+            }
+            case "$2" in
+                kraken2|metabuli|minimap2|kmersutra)
+                    RETRY_METHODS+=("$2")
+                    ;;
+                *)
+                    printf 'ERROR: unsupported retry method: %s\n' "$2" >&2
+                    exit 2
+                    ;;
+            esac
+            shift 2
+            ;;
         --help|-h)
             usage
             exit 0
@@ -94,6 +113,12 @@ done
     printf 'ERROR: --jobs must be a positive integer\n' >&2
     exit 2
 }
+if [[ ${#RETRY_METHODS[@]} -gt 0 \
+    && "${ACTION}" != "plan-slurm" \
+    && "${ACTION}" != "submit-slurm" ]]; then
+    printf 'ERROR: --retry-method requires --action plan-slurm or submit-slurm\n' >&2
+    exit 2
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -171,6 +196,9 @@ case "${ACTION}" in
         if [[ -n "${SUBMISSION_FLAG}" ]]; then
             COMMAND+=("${SUBMISSION_FLAG}")
         fi
+        for RETRY_METHOD in "${RETRY_METHODS[@]}"; do
+            COMMAND+=(--retry-method "${RETRY_METHOD}")
+        done
         "${COMMAND[@]}"
         ;;
     dry-run|run)

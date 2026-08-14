@@ -7,7 +7,7 @@ run:
 deployment:
   # Submission is refused when this does not match the installed repository.
   expected_repository_root: /absolute/path/to/nanopore_metagenomics_workflow
-  expected_package_version: 0.4.1
+  expected_package_version: 0.4.2
   conda_environment: nanopore_realdata_workflow
 
 inputs:

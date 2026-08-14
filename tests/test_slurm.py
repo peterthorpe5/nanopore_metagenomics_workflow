@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import yaml
 
-from helpers import build_test_project
+from helpers import build_test_project, write_fastq
 from nanopore_realdata.config import load_workflow_config
 from nanopore_realdata.slurm import (
     JobPlan,
@@ -23,10 +23,25 @@ from nanopore_realdata.slurm import (
     _refuse_active_jobs,
     _sbatch_command,
     _submit,
+    build_retry_plan,
     build_submission_plan,
     planned_commands,
     submit_workflow,
 )
+
+
+def prepare_retry_inputs(*, config_path: Path) -> None:
+    """Create retained classification-ready FASTQs for retry tests."""
+    workflow = load_workflow_config(config_path=config_path)
+    for sample in workflow.samples:
+        write_fastq(
+            path=(
+                workflow.output_directory
+                / "01_host_depletion"
+                / sample.sample_id
+                / "non_host.fastq.gz"
+            )
+        )
 
 
 class TestSlurmPlan(unittest.TestCase):
@@ -122,6 +137,46 @@ class TestSlurmPlan(unittest.TestCase):
         self.assertIn("build_minimap_reference", keys)
         self.assertEqual(index.dependency_keys, ("build_minimap_reference",))
         self.assertNotIn("classify_kmersutra", {plan.key for plan in disabled})
+
+    def test_selective_retry_contains_only_requested_methods_and_aggregation(self) -> None:
+        """A resource repair must not resubmit successful classifier branches."""
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = build_test_project(
+                root=Path(temporary),
+                input_read_state="host_removed",
+            )
+            workflow = load_workflow_config(config_path=config_path)
+            with self.assertRaisesRegex(RuntimeError, "classification-ready FASTQs"):
+                build_retry_plan(workflow=workflow, methods=("kraken2",))
+            prepare_retry_inputs(config_path=config_path)
+            plans = build_retry_plan(workflow=workflow, methods=("kraken2",))
+
+        self.assertEqual(
+            [plan.key for plan in plans],
+            ["retry_classify_kraken2", "retry_aggregate"],
+        )
+        self.assertEqual(plans[0].dependency_keys, ())
+        self.assertEqual(plans[0].resources.memory_mb, 2000)
+        self.assertEqual(plans[1].dependency_keys, ("retry_classify_kraken2",))
+
+    def test_selective_retry_validates_methods_and_minimap_index(self) -> None:
+        """Invalid, duplicated, disabled or unprepared retries must fail early."""
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = build_test_project(
+                root=Path(temporary),
+                input_read_state="host_removed",
+                kmersutra_enabled=False,
+            )
+            prepare_retry_inputs(config_path=config_path)
+            workflow = load_workflow_config(config_path=config_path)
+            with self.assertRaisesRegex(ValueError, "Unknown retry methods"):
+                build_retry_plan(workflow=workflow, methods=("unknown",))
+            with self.assertRaisesRegex(ValueError, "duplicated"):
+                build_retry_plan(workflow=workflow, methods=("kraken2", "kraken2"))
+            with self.assertRaisesRegex(ValueError, "disabled"):
+                build_retry_plan(workflow=workflow, methods=("kmersutra",))
+            with self.assertRaisesRegex(RuntimeError, "validated index"):
+                build_retry_plan(workflow=workflow, methods=("minimap2",))
 
 
 class TestSlurmSubmission(unittest.TestCase):
@@ -254,6 +309,104 @@ class TestSlurmSubmission(unittest.TestCase):
             history = list((journal_path.parent / "submission_history").glob("*.json"))
         checked.assert_called_once()
         self.assertEqual(len(history), 1)
+
+    def test_selective_retry_allows_resource_change_and_submits_only_failed_method(self) -> None:
+        """A changed method allocation may retry one array without other classifiers."""
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = build_test_project(
+                root=Path(temporary),
+                input_read_state="host_removed",
+            )
+            identifiers = (str(number) for number in range(500, 600))
+            with patch(
+                "nanopore_realdata.slurm._submit",
+                side_effect=lambda **_: next(identifiers),
+            ):
+                journal_path = submit_workflow(
+                    config_path=config_path,
+                    resume_submission=False,
+                    new_attempt=False,
+                )
+            prepare_retry_inputs(config_path=config_path)
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["resources"]["kraken2_memory_mb"] = 409600
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+            with (
+                patch("nanopore_realdata.slurm._refuse_active_jobs") as checked,
+                patch(
+                    "nanopore_realdata.slurm._submit",
+                    side_effect=("700", "701"),
+                ) as submitted,
+            ):
+                retry_journal = submit_workflow(
+                    config_path=config_path,
+                    resume_submission=False,
+                    new_attempt=False,
+                    retry_methods=("kraken2",),
+                )
+            payload = json.loads(retry_journal.read_text(encoding="utf-8"))
+            history = list((journal_path.parent / "submission_history").glob("*.json"))
+
+        checked.assert_called_once()
+        self.assertEqual(submitted.call_count, 2)
+        self.assertEqual(payload["submission_mode"], "selective_retry")
+        self.assertEqual(payload["retry_methods"], ["kraken2"])
+        self.assertEqual(
+            set(payload["jobs"]),
+            {"retry_classify_kraken2", "retry_aggregate"},
+        )
+        self.assertEqual(
+            payload["jobs"]["retry_aggregate"]["dependency_job_ids"],
+            ["700"],
+        )
+        self.assertIn("--mem=409600M", payload["jobs"]["retry_classify_kraken2"]["command"])
+        self.assertEqual(len(history), 1)
+
+    def test_interrupted_selective_retry_resumes_only_missing_retry_job(self) -> None:
+        """An interrupted selective submission must resume its stored small plan."""
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = build_test_project(
+                root=Path(temporary),
+                input_read_state="host_removed",
+            )
+            identifiers = (str(number) for number in range(800, 900))
+            with patch(
+                "nanopore_realdata.slurm._submit",
+                side_effect=lambda **_: next(identifiers),
+            ):
+                submit_workflow(
+                    config_path=config_path,
+                    resume_submission=False,
+                    new_attempt=False,
+                )
+            prepare_retry_inputs(config_path=config_path)
+            with (
+                patch("nanopore_realdata.slurm._refuse_active_jobs"),
+                patch(
+                    "nanopore_realdata.slurm._submit",
+                    side_effect=("900", RuntimeError("temporary sbatch failure")),
+                ),
+                self.assertRaisesRegex(RuntimeError, "temporary sbatch failure"),
+            ):
+                submit_workflow(
+                    config_path=config_path,
+                    resume_submission=False,
+                    new_attempt=False,
+                    retry_methods=("kraken2",),
+                )
+            with patch("nanopore_realdata.slurm._submit", return_value="901") as resumed:
+                journal_path = submit_workflow(
+                    config_path=config_path,
+                    resume_submission=True,
+                    new_attempt=False,
+                )
+            payload = json.loads(journal_path.read_text(encoding="utf-8"))
+
+        resumed.assert_called_once()
+        self.assertEqual(payload["status"], "submitted")
+        self.assertEqual(payload["jobs"]["retry_classify_kraken2"]["job_id"], "900")
+        self.assertEqual(payload["jobs"]["retry_aggregate"]["job_id"], "901")
 
     def test_journal_and_dependency_validation_reject_corruption(self) -> None:
         """Malformed state must stop before an unsafe sbatch call."""

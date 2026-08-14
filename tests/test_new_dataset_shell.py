@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPOSITORY_ROOT / "scripts" / "start_new_dataset.sh"
+DUNDEE_SUBMISSION_SCRIPT = REPOSITORY_ROOT / "scripts" / "submit_dundee_real_reads_v2_20260810.sh"
 
 
 class TestNewDatasetShell(unittest.TestCase):
@@ -148,6 +149,8 @@ class TestNewDatasetShell(unittest.TestCase):
                     "plan-slurm",
                     "--config",
                     str(config),
+                    "--retry-method",
+                    "kraken2",
                 ],
                 check=False,
                 capture_output=True,
@@ -162,6 +165,43 @@ class TestNewDatasetShell(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn("plan-slurm", forwarded)
         self.assertIn(str(config), forwarded)
+        self.assertIn("--retry-method\nkraken2", forwarded)
+
+    def test_dundee_submission_forwards_selective_retry(self) -> None:
+        """The benchmark wrapper must expose the generic classifier retry safely."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary_directory = root / "bin"
+            binary_directory.mkdir()
+            arguments = root / "arguments.txt"
+            fake_conda = binary_directory / "conda"
+            fake_conda.write_text(
+                '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "${ARGUMENT_FILE}"\n',
+                encoding="utf-8",
+            )
+            fake_conda.chmod(0o755)
+            completed = subprocess.run(
+                [
+                    "bash",
+                    str(DUNDEE_SUBMISSION_SCRIPT),
+                    "--plan",
+                    "--retry-method",
+                    "kraken2",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{binary_directory}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "ARGUMENT_FILE": str(arguments),
+                },
+            )
+            forwarded = arguments.read_text(encoding="utf-8")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("plan-slurm", forwarded)
+        self.assertIn("--retry-method\nkraken2", forwarded)
 
 
 if __name__ == "__main__":

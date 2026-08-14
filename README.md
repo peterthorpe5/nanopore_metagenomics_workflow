@@ -1,6 +1,6 @@
 # Nanopore real-read classifier workflow
 
-Version 0.4.1 is a restartable workflow for real Oxford Nanopore FASTQ data.
+Version 0.4.2 is a restartable workflow for real Oxford Nanopore FASTQ data.
 It runs Kraken2, Metabuli, masked-reference minimap2 and KmerSutra as
 independent classifier branches. An independent PCR truth table can be added
 for a benchmark, but is not required for routine real-sample classification.
@@ -13,7 +13,7 @@ one frozen 11-sample host-removed MRC benchmark preset in
 interpretations. `MRC1123_WuH001WB` remains in the classifier run but is marked
 PCR `unknown` and excluded from the primary comparison.
 
-## Why v0.4.1 exists
+## Why v0.4.2 exists
 
 The previous partial run revealed two structural problems:
 
@@ -22,7 +22,9 @@ The previous partial run revealed two structural problems:
 - minimap2 used a very large mixed reference that split into about 30 index
   parts. Queries were mapped once per part, inflating mapped-read counts.
 
-The v0.4 series removes both failure modes:
+The v0.4 series removes both failure modes. Version 0.4.2 additionally repairs
+PCR-negative evidence formatting and adds selective method retry after a
+resource failure:
 
 - every classifier is a separate per-sample Slurm array;
 - KmerSutra depends only on prepared reads, never on another classifier;
@@ -32,7 +34,11 @@ The v0.4 series removes both failure modes:
   terminal classifier jobs even when some fail;
 - outer Slurm failures are recorded per sample where the wrapper remains alive;
 - missing hard-kill records remain `missing`, never biological negatives; and
-- submission is journalled after every accepted Slurm job ID.
+- submission is journalled after every accepted Slurm job ID;
+- PCR remains an optional reporting-only input and ordinary datasets do not
+  require a truth table; and
+- `--retry-method` submits only named failed classifier arrays plus fresh
+  aggregation, preserving unrelated successful results.
 
 ## Reduced masked-reference minimap2 contract
 
@@ -80,7 +86,7 @@ The prepared array limits are intentionally conservative:
 
 | Method | Per-task resources | Maximum concurrent samples | QoS |
 |---|---:|---:|---|
-| Kraken2 | 12 CPUs, 96 GB | 1 | cluster default |
+| Kraken2 | 12 CPUs, 400 GiB | 1 | cluster default |
 | Metabuli | 12 CPUs, 160 GB | 1 | cluster default |
 | minimap2 | 12 CPUs, 160 GB | 2 | cluster default |
 | KmerSutra | 24 CPUs, 96 GB | 1 | `4week` |
@@ -167,6 +173,26 @@ bash scripts/submit_dundee_real_reads_v2_20260810.sh --new-attempt
 The submitter refuses an ambiguous repeat and checks `squeue` before allowing a
 new attempt. It never deletes an earlier run.
 
+When only one classifier needs a resource repair, use a selective retry. This
+omits preflight, input acceptance, the minimap2 index and every unrelated
+classifier array:
+
+```bash
+bash scripts/submit_dundee_real_reads_v2_20260810.sh \
+    --plan \
+    --retry-method kraken2
+
+bash scripts/submit_dundee_real_reads_v2_20260810.sh \
+    --retry-method kraken2
+```
+
+The prepared benchmark assigns 409,600 MB (400 GiB) to each Kraken2 retry
+task. That allocation is specific to the large configured Dundee Kraken2
+database and is not imposed by the reusable template.
+
+See `docs/RECOVERY_V0_4_2.md` for the exact Mac-to-GitHub-to-Dundee recovery
+sequence and acceptance checks.
+
 ## Final results
 
 The final directory contains:
@@ -229,8 +255,22 @@ The number of array tasks comes from the manifest. Interrupted submissions can
 use `--action resume-submission`; a later deliberate retry can use
 `--action new-attempt` after the existing jobs have ended.
 
+To repair only selected failed methods while preserving successful branches:
+
+```bash
+bash scripts/start_new_dataset.sh \
+    --action plan-slurm \
+    --config config/my_run.yaml \
+    --retry-method kraken2
+
+bash scripts/start_new_dataset.sh \
+    --action submit-slurm \
+    --config config/my_run.yaml \
+    --retry-method kraken2
+```
+
 Raw-read configurations remain supported through the Snakemake path using
-`--action dry-run` and `--action run` with a host reference. Version 0.4.1
+`--action dry-run` and `--action run` with a host reference. Version 0.4.2
 deliberately refuses raw reads in the detached submitter because host depletion
 is not yet implemented there as independent per-sample array tasks.
 

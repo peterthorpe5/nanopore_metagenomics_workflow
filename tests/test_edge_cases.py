@@ -270,14 +270,27 @@ class TestCliRouting(unittest.TestCase):
             self.assertEqual(recorder.call_args.kwargs["sample_id"], "sample_1")
 
             with (
-                patch("nanopore_realdata.cli.planned_commands", return_value=[{"key": "x"}]),
+                patch(
+                    "nanopore_realdata.cli.planned_commands",
+                    return_value=[{"key": "x"}],
+                ) as planned,
                 patch("builtins.print") as printed,
             ):
                 self.assertEqual(
-                    main(["--action", "plan-slurm", "--config", str(config_path)]),
+                    main(
+                        [
+                            "--action",
+                            "plan-slurm",
+                            "--config",
+                            str(config_path),
+                            "--retry-method",
+                            "kraken2",
+                        ]
+                    ),
                     0,
                 )
             self.assertTrue(printed.called)
+            self.assertEqual(planned.call_args.kwargs["retry_methods"], ("kraken2",))
 
             journal = root / "journal.json"
             with patch("nanopore_realdata.cli.submit_workflow", return_value=journal) as submit:
@@ -294,6 +307,7 @@ class TestCliRouting(unittest.TestCase):
                     0,
                 )
             self.assertTrue(submit.call_args.kwargs["new_attempt"])
+            self.assertEqual(submit.call_args.kwargs["retry_methods"], ())
 
     def test_generated_reference_action_uses_configured_defaults(self) -> None:
         """The optional generic reference builder should remain CLI-reachable."""

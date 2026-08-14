@@ -73,7 +73,7 @@ def build_test_project(
         },
         "deployment": {
             "expected_repository_root": str(repository_root),
-            "expected_package_version": "0.4.1",
+            "expected_package_version": "0.4.2",
             "conda_environment": "test_environment",
         },
         "inputs": {

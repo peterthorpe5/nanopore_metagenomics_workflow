@@ -80,6 +80,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unlock", action="store_true")
     parser.add_argument("--resume-submission", action="store_true")
     parser.add_argument("--new-attempt", action="store_true")
+    parser.add_argument(
+        "--retry-method",
+        action="append",
+        default=[],
+        choices=("kraken2", "metabuli", "minimap2", "kmersutra"),
+        help=(
+            "Submit only this classifier array and fresh aggregation; repeatable and "
+            "valid only with plan-slurm or submit-slurm"
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -95,6 +105,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(arguments)
+    if args.retry_method and args.action not in {"plan-slurm", "submit-slurm"}:
+        parser.error("--retry-method is valid only with plan-slurm or submit-slurm")
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s\t%(levelname)s\t%(name)s\t%(message)s",
@@ -259,13 +271,22 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.action == "plan-slurm":
-        print(json.dumps(planned_commands(config_path=args.config), indent=2))
+        print(
+            json.dumps(
+                planned_commands(
+                    config_path=args.config,
+                    retry_methods=tuple(args.retry_method),
+                ),
+                indent=2,
+            )
+        )
         return 0
     if args.action == "submit-slurm":
         journal = submit_workflow(
             config_path=args.config,
             resume_submission=args.resume_submission,
             new_attempt=args.new_attempt,
+            retry_methods=tuple(args.retry_method),
         )
         logging.getLogger(__name__).warning("Slurm submission journal: %s", journal)
         return 0

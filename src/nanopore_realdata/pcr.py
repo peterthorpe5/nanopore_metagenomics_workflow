@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -334,11 +335,17 @@ def _number(value: Any) -> float:
         numeric = float(value)
     except (TypeError, ValueError):
         return 0.0
+    if not math.isfinite(numeric):
+        return 0.0
     return max(0.0, numeric)
 
 
-def _display_number(value: float) -> str:
-    return str(int(value)) if value.is_integer() else f"{value:.6g}"
+def _display_number(value: float | int) -> str:
+    """Format finite integer or floating-point evidence without false decimals."""
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return "0"
+    return str(int(numeric)) if numeric.is_integer() else f"{numeric:.6g}"
 
 
 def _boolean_result(value: bool) -> str:

@@ -46,7 +46,7 @@ class JobPlan:
 
 
 def build_submission_plan(*, workflow: WorkflowConfig) -> tuple[JobPlan, ...]:
-    """Build the detached DAG used for the PCR-validated real-read run.
+    """Build the detached DAG used for a real-read dataset.
 
     Args:
         workflow: Validated workflow configuration.
@@ -185,6 +185,121 @@ def build_submission_plan(*, workflow: WorkflowConfig) -> tuple[JobPlan, ...]:
     return tuple(plans)
 
 
+def build_retry_plan(
+    *,
+    workflow: WorkflowConfig,
+    methods: Sequence[str],
+) -> tuple[JobPlan, ...]:
+    """Build a selective classifier retry followed by fresh aggregation.
+
+    A retry plan deliberately omits input preparation and unrelated classifier
+    arrays. Existing successful results therefore cannot be rerun merely
+    because a failed method needs different scheduler resources.
+
+    Args:
+        workflow: Validated workflow configuration.
+        methods: Classifier methods to retry.
+
+    Returns:
+        Per-sample retry arrays and one dependent aggregation job.
+
+    Raises:
+        ValueError: If a method is unknown, duplicated or disabled.
+        RuntimeError: If retained classification-ready inputs are unavailable.
+    """
+    selected = _validated_retry_methods(workflow=workflow, methods=methods)
+    _validate_retry_prerequisites(workflow=workflow, methods=selected)
+    full_plans = {
+        plan.method: plan
+        for plan in build_submission_plan(workflow=workflow)
+        if plan.action == "classify"
+    }
+    plans: list[JobPlan] = []
+    classifier_keys: list[str] = []
+    for method in selected:
+        source = full_plans[method]
+        key = f"retry_{source.key}"
+        classifier_keys.append(key)
+        plans.append(
+            JobPlan(
+                key=key,
+                name=f"NRD_retry_{method[:8]}",
+                action=source.action,
+                resources=source.resources,
+                method=source.method,
+                array=source.array,
+            )
+        )
+    plans.append(
+        JobPlan(
+            key="retry_aggregate",
+            name="NRD_retry_aggregate",
+            action="aggregate",
+            resources=JobResources(2, 8192, 180, workflow.slurm_default_qos),
+            dependency_mode="afterany",
+            dependency_keys=tuple(classifier_keys),
+        )
+    )
+    return tuple(plans)
+
+
+def _validated_retry_methods(
+    *,
+    workflow: WorkflowConfig,
+    methods: Sequence[str],
+) -> tuple[str, ...]:
+    """Validate and retain the user-supplied retry order."""
+    selected = tuple(methods)
+    if not selected:
+        raise ValueError("At least one --retry-method is required")
+    unknown = sorted(set(selected).difference(METHODS))
+    if unknown:
+        raise ValueError(f"Unknown retry methods: {unknown}")
+    if len(set(selected)) != len(selected):
+        raise ValueError("Retry methods must not be duplicated")
+    if "kmersutra" in selected and not workflow.kmersutra_enabled:
+        raise ValueError("KmerSutra cannot be retried because it is disabled")
+    return selected
+
+
+def _validate_retry_prerequisites(
+    *,
+    workflow: WorkflowConfig,
+    methods: Sequence[str],
+) -> None:
+    """Require retained prepared reads and method-specific shared assets."""
+    missing = [
+        workflow.output_directory / "01_host_depletion" / sample.sample_id / "non_host.fastq.gz"
+        for sample in workflow.samples
+        if not _is_non_empty_file(
+            workflow.output_directory / "01_host_depletion" / sample.sample_id / "non_host.fastq.gz"
+        )
+    ]
+    if missing:
+        raise RuntimeError(
+            "Selective retry requires retained classification-ready FASTQs; missing: "
+            + ", ".join(str(path) for path in missing)
+        )
+    if "minimap2" in methods:
+        index = workflow.output_directory / "00_preflight" / "classification_reference.mmi"
+        completion = (
+            workflow.output_directory
+            / "00_preflight"
+            / "classification_reference_index.complete.json"
+        )
+        absent = [path for path in (index, completion) if not _is_non_empty_file(path)]
+        if absent:
+            raise RuntimeError(
+                "Selective minimap2 retry requires the retained validated index; missing: "
+                + ", ".join(str(path) for path in absent)
+            )
+
+
+def _is_non_empty_file(path: Path) -> bool:
+    """Return whether a regular file exists and contains at least one byte."""
+    return path.is_file() and path.stat().st_size > 0
+
+
 def _validated_repository_root(*, workflow: WorkflowConfig) -> Path:
     """Validate the executing checkout and configured package version.
 
@@ -219,6 +334,7 @@ def submit_workflow(
     config_path: Path,
     resume_submission: bool,
     new_attempt: bool,
+    retry_methods: Sequence[str] = (),
 ) -> Path:
     """Submit the detached Slurm DAG and journal every accepted job ID.
 
@@ -226,6 +342,7 @@ def submit_workflow(
         config_path: Workflow configuration.
         resume_submission: Continue an interrupted submission journal.
         new_attempt: Archive a completed journal and submit a fresh attempt.
+        retry_methods: Submit only these failed classifier arrays and aggregation.
 
     Returns:
         Durable submission journal path.
@@ -234,8 +351,8 @@ def submit_workflow(
         RuntimeError: If submission is unsafe or ``sbatch`` rejects a job.
         ValueError: If mutually exclusive controls are requested.
     """
-    if resume_submission and new_attempt:
-        raise ValueError("resume_submission and new_attempt are mutually exclusive")
+    if sum((bool(resume_submission), bool(new_attempt), bool(retry_methods))) > 1:
+        raise ValueError("resume_submission, new_attempt and retry_methods are mutually exclusive")
     workflow = load_workflow_config(config_path=config_path)
     repository_root = _validated_repository_root(workflow=workflow)
     stage_script = repository_root / "workflow" / "slurm" / "run_stage.sh"
@@ -247,38 +364,76 @@ def submit_workflow(
     log_root.mkdir(parents=True, exist_ok=True)
     journal_path = control_root / "slurm_submission.json"
     config_digest = sha256_file(path=workflow.config_path)
+    retry_methods_validated: tuple[str, ...] = ()
+    if retry_methods:
+        retry_methods_validated = _validated_retry_methods(
+            workflow=workflow,
+            methods=retry_methods,
+        )
+        _validate_retry_prerequisites(
+            workflow=workflow,
+            methods=retry_methods_validated,
+        )
     journal = _initial_journal(
         workflow=workflow,
         repository_root=repository_root,
         config_digest=config_digest,
+        retry_methods=retry_methods_validated,
     )
     if journal_path.is_file():
         current = _load_journal(path=journal_path)
-        _validate_journal_identity(
-            journal=current,
-            workflow=workflow,
-            repository_root=repository_root,
-            config_digest=config_digest,
-        )
+        if retry_methods_validated:
+            _validate_retry_journal_identity(
+                journal=current,
+                workflow=workflow,
+                repository_root=repository_root,
+            )
+            _refuse_active_jobs(journal=current)
+            _archive_journal(path=journal_path)
+        else:
+            _validate_journal_identity(
+                journal=current,
+                workflow=workflow,
+                repository_root=repository_root,
+                config_digest=config_digest,
+            )
         if resume_submission:
             if current.get("status") != "submitting":
                 raise RuntimeError(
                     "--resume-submission is only valid for an interrupted submission"
                 )
+            if current.get("submission_mode") == "selective_retry":
+                stored_methods = current.get("retry_methods")
+                if not isinstance(stored_methods, list):
+                    raise RuntimeError(
+                        "Interrupted selective-retry journal has invalid retry_methods"
+                    )
+                retry_methods_validated = _validated_retry_methods(
+                    workflow=workflow,
+                    methods=tuple(str(method) for method in stored_methods),
+                )
+                _validate_retry_prerequisites(
+                    workflow=workflow,
+                    methods=retry_methods_validated,
+                )
             journal = current
         elif new_attempt:
             _refuse_active_jobs(journal=current)
-            history = control_root / "submission_history"
-            history.mkdir(parents=True, exist_ok=True)
-            archived = history / f"slurm_submission.{utc_now().replace(':', '')}.json"
-            shutil.copy2(journal_path, archived)
-        else:
+            _archive_journal(path=journal_path)
+        elif not retry_methods_validated:
             raise RuntimeError(
                 "A submission journal already exists. Use --resume-submission only for "
-                "an interrupted submission, or --new-attempt after confirming prior jobs ended."
+                "an interrupted submission, --new-attempt after confirming prior jobs ended, "
+                "or --retry-method for a selective classifier retry."
             )
+    elif retry_methods_validated:
+        raise RuntimeError("Selective retry requires an existing Slurm submission journal")
     write_json_atomic(path=journal_path, payload=journal)
-    plans = build_submission_plan(workflow=workflow)
+    plans = (
+        build_retry_plan(workflow=workflow, methods=retry_methods_validated)
+        if retry_methods_validated
+        else build_submission_plan(workflow=workflow)
+    )
     jobs = journal.setdefault("jobs", {})
     assert isinstance(jobs, dict)
     for plan in plans:
@@ -312,7 +467,11 @@ def submit_workflow(
     return journal_path
 
 
-def planned_commands(*, config_path: Path) -> list[dict[str, Any]]:
+def planned_commands(
+    *,
+    config_path: Path,
+    retry_methods: Sequence[str] = (),
+) -> list[dict[str, Any]]:
     """Return a non-mutating human-readable detached submission plan.
 
     Args:
@@ -323,6 +482,11 @@ def planned_commands(*, config_path: Path) -> list[dict[str, Any]]:
     """
     workflow = load_workflow_config(config_path=config_path)
     _validated_repository_root(workflow=workflow)
+    plans = (
+        build_retry_plan(workflow=workflow, methods=retry_methods)
+        if retry_methods
+        else build_submission_plan(workflow=workflow)
+    )
     return [
         {
             "key": plan.key,
@@ -336,7 +500,7 @@ def planned_commands(*, config_path: Path) -> list[dict[str, Any]]:
             "runtime_minutes": plan.resources.runtime_minutes,
             "qos": plan.resources.qos or "default",
         }
-        for plan in build_submission_plan(workflow=workflow)
+        for plan in plans
     ]
 
 
@@ -345,6 +509,7 @@ def _initial_journal(
     workflow: WorkflowConfig,
     repository_root: Path,
     config_digest: str,
+    retry_methods: Sequence[str] = (),
 ) -> dict[str, Any]:
     return {
         "status": "submitting",
@@ -357,8 +522,19 @@ def _initial_journal(
         "account": workflow.slurm_account,
         "partition": workflow.slurm_partition,
         "sample_count": len(workflow.samples),
+        "submission_mode": "selective_retry" if retry_methods else "full",
+        "retry_methods": list(retry_methods),
         "jobs": {},
     }
+
+
+def _archive_journal(*, path: Path) -> Path:
+    """Copy the current durable journal into immutable attempt history."""
+    history = path.parent / "submission_history"
+    history.mkdir(parents=True, exist_ok=True)
+    archived = history / f"slurm_submission.{utc_now().replace(':', '')}.json"
+    shutil.copy2(path, archived)
+    return archived
 
 
 def _load_journal(*, path: Path) -> dict[str, Any]:
@@ -392,6 +568,27 @@ def _validate_journal_identity(
     }
     if differences:
         raise RuntimeError(f"Slurm journal identity differs from this run: {differences}")
+
+
+def _validate_retry_journal_identity(
+    *,
+    journal: Mapping[str, Any],
+    workflow: WorkflowConfig,
+    repository_root: Path,
+) -> None:
+    """Validate stable run identity while allowing a resource-only upgrade."""
+    expected = {
+        "run_id": workflow.run_id,
+        "config": str(workflow.config_path),
+        "repository_root": str(repository_root),
+    }
+    differences = {
+        key: {"journal": journal.get(key), "current": value}
+        for key, value in expected.items()
+        if journal.get(key) != value
+    }
+    if differences:
+        raise RuntimeError(f"Slurm journal does not belong to this selective retry: {differences}")
 
 
 def _dependency_ids(*, plan: JobPlan, jobs: Mapping[str, Any]) -> tuple[str, ...]:

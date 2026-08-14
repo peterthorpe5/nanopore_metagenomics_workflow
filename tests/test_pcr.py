@@ -99,6 +99,33 @@ class TestPcrConcordance(unittest.TestCase):
         self.assertEqual(rows[1]["comparison_status"], "classifier_unavailable")
         self.assertEqual(summaries[1]["unavailable_sample_count"], "1")
 
+    def test_negative_truth_formats_zero_evidence_without_type_failure(self) -> None:
+        """PCR-negative rows must accept the integer zero returned by empty sums."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            truth = root / "truth.tsv"
+            truth.write_text(
+                "sample_id\tpcr_status\tpcr_species\tpcr_assay_or_source\t"
+                "pcr_notes\tinclude_in_primary_comparison\n"
+                "sample_1\tnegative\t\tPCR\tNo Plasmodium detected\ttrue\n",
+                encoding="utf-8",
+            )
+            records = load_pcr_truth(
+                path=truth,
+                samples=(Sample("sample_1", (root / "one.fastq.gz",)),),
+            )
+
+        rows, summaries = build_pcr_concordance(
+            truth_records=records,
+            status_rows=[{"sample_id": "sample_1", "method": "minimap2", "status": "success"}],
+            evidence_rows=[],
+            methods=("minimap2",),
+        )
+
+        self.assertEqual(rows[0]["expected_species_evidence_count"], "0")
+        self.assertEqual(rows[0]["comparison_status"], "concordant_negative")
+        self.assertEqual(summaries[0]["concordant_negative_count"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()

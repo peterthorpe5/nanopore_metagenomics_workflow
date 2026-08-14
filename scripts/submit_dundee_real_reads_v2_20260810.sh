@@ -11,11 +11,13 @@ usage() {
         "  --plan               Print the job arrays and dependencies only" \
         "  --resume-submission  Resume a submission interrupted between sbatch calls" \
         "  --new-attempt        Submit a new attempt after all previous jobs ended" \
+        "  --retry-method NAME  Retry only one failed classifier plus aggregation" \
         "  --help"
 }
 
 ACTION="submit-slurm"
 SUBMISSION_FLAG=""
+RETRY_METHODS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +41,22 @@ while [[ $# -gt 0 ]]; do
             SUBMISSION_FLAG="--new-attempt"
             shift
             ;;
+        --retry-method)
+            [[ $# -ge 2 ]] || {
+                printf 'ERROR: --retry-method requires a classifier name\n' >&2
+                exit 2
+            }
+            case "$2" in
+                kraken2|metabuli|minimap2|kmersutra)
+                    RETRY_METHODS+=("$2")
+                    ;;
+                *)
+                    printf 'ERROR: unsupported retry method: %s\n' "$2" >&2
+                    exit 2
+                    ;;
+            esac
+            shift 2
+            ;;
         --help|-h)
             usage
             exit 0
@@ -53,6 +71,11 @@ done
 
 if [[ "${ACTION}" == "plan-slurm" && -n "${SUBMISSION_FLAG}" ]]; then
     printf 'ERROR: --plan cannot be combined with a submission recovery flag\n' >&2
+    exit 2
+fi
+
+if [[ -n "${SUBMISSION_FLAG}" && ${#RETRY_METHODS[@]} -gt 0 ]]; then
+    printf 'ERROR: --retry-method cannot be combined with a submission recovery flag\n' >&2
     exit 2
 fi
 
@@ -79,6 +102,9 @@ COMMAND=(
 if [[ -n "${SUBMISSION_FLAG}" ]]; then
     COMMAND+=("${SUBMISSION_FLAG}")
 fi
+for RETRY_METHOD in "${RETRY_METHODS[@]}"; do
+    COMMAND+=(--retry-method "${RETRY_METHOD}")
+done
 
 printf 'Repository: %s\n' "${REPOSITORY_ROOT}"
 printf 'Configuration: %s\n' "${CONFIG_PATH}"
