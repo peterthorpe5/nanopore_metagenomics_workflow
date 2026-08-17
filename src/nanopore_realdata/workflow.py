@@ -1869,6 +1869,7 @@ def _run_minimap2(
                 reference_index=reference_index,
                 input_fastq=input_fastq,
                 threads=workflow.threads_minimap2,
+                preset=workflow.minimap_preset,
             ),
             pigz_command(threads=workflow.threads_minimap2),
         ],

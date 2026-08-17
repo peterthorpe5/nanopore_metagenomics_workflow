@@ -1,0 +1,2 @@
+sample_id	fastq	run_id	barcode	description
+SRR9328980	/gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/benchmarks/kmersutra_atcc_msa1003/atcc_msa1003_hifi_srr9328980_heldout_v0512_20260731/stages/01_acquire_reads/fastq/SRR9328980.fastq.gz	atcc_msa1003_hifi_comparators_20260817		PacBio HiFi ATCC MSA-1003 microbial mock-community reads; classification-ready, no host depletion required

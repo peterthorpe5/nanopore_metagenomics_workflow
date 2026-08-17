@@ -68,22 +68,27 @@ def minimap2_classification_command(
     reference_index: Path,
     input_fastq: Path,
     threads: int,
+    preset: str = "map-ont",
 ) -> list[str]:
-    """Build the controlled-reference ONT classification command.
+    """Build the controlled-reference long-read classification command.
 
     Args:
         reference_index: Minimap2 MMI index built from the classification FASTA.
         input_fastq: Host-removed analysis reads.
         threads: Worker threads.
+        preset: Minimap2 sequencing-platform preset. ``map-hifi`` is required
+            for PacBio HiFi reads; ``map-ont`` remains the default for ONT.
 
     Returns:
         Command producing PAF with CIGAR tags on standard output.
     """
     _require_positive(threads=threads)
+    if preset not in {"map-ont", "map-hifi"}:
+        raise ValueError(f"Unsupported minimap2 classification preset: {preset}")
     return [
         "minimap2",
         "-x",
-        "map-ont",
+        preset,
         "--secondary=yes",
         "-c",
         "-t",

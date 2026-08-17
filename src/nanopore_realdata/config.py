@@ -53,6 +53,7 @@ class WorkflowConfig:
     minimap_index_batch_size_bases: int
     minimap_maximum_index_bytes: int
     minimap_index: Path | None
+    minimap_preset: str
     scratch_root: Path
     stage_resources: bool
     minimum_scratch_gb: int
@@ -269,6 +270,12 @@ def load_workflow_config(*, config_path: Path) -> WorkflowConfig:
             "maximum_index_bytes",
         ),
         minimap_index=minimap_index,
+        minimap_preset=_choice_default(
+            minimap2,
+            "preset",
+            choices={"map-ont", "map-hifi"},
+            default="map-ont",
+        ),
         scratch_root=scratch_root,
         stage_resources=_boolean(execution, "stage_resources"),
         minimum_scratch_gb=_positive_int(execution, "minimum_scratch_gb"),
