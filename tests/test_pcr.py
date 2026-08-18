@@ -77,6 +77,7 @@ class TestPcrConcordance(unittest.TestCase):
                 "sample_id": "sample_1",
                 "method": "minimap2",
                 "taxon_name": "Plasmodium Inui",
+                "rank": "controlled_reference",
                 "detected": True,
                 "evidence_count": 7,
             },
@@ -84,6 +85,7 @@ class TestPcrConcordance(unittest.TestCase):
                 "sample_id": "sample_1",
                 "method": "minimap2",
                 "taxon_name": "Plasmodium cynomolgi",
+                "rank": "controlled_reference",
                 "detected": True,
                 "evidence_count": 3,
             },
@@ -125,6 +127,67 @@ class TestPcrConcordance(unittest.TestCase):
         self.assertEqual(rows[0]["expected_species_evidence_count"], "0")
         self.assertEqual(rows[0]["comparison_status"], "concordant_negative")
         self.assertEqual(summaries[0]["concordant_negative_count"], "1")
+
+    def test_bacterial_truth_uses_exact_species_ranks_only(self) -> None:
+        """Evaluate bacterial truth without promoting strain descendants."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            truth = root / "truth.tsv"
+            truth.write_text(
+                "sample_id\tpcr_status\tpcr_species\tpcr_assay_or_source\t"
+                "pcr_notes\tinclude_in_primary_comparison\n"
+                "sample_1\tpositive\tEscherichia coli; Cereibacter sphaeroides\t"
+                "reference composition\t\ttrue\n",
+                encoding="utf-8",
+            )
+            records = load_pcr_truth(
+                path=truth,
+                samples=(Sample("sample_1", (root / "one.fastq.gz",)),),
+            )
+
+        evidence = [
+            {
+                "sample_id": "sample_1",
+                "method": "metabuli",
+                "taxon_name": "Escherichia coli",
+                "rank": "species",
+                "detected": True,
+                "evidence_count": 100,
+            },
+            {
+                "sample_id": "sample_1",
+                "method": "metabuli",
+                "taxon_name": "Escherichia coli K-12",
+                "rank": "strain",
+                "detected": True,
+                "evidence_count": 10,
+            },
+            {
+                "sample_id": "sample_1",
+                "method": "metabuli",
+                "taxon_name": "Shigella flexneri",
+                "rank": "species",
+                "detected": True,
+                "evidence_count": 3,
+            },
+        ]
+        rows, _ = build_pcr_concordance(
+            truth_records=records,
+            status_rows=[
+                {
+                    "sample_id": "sample_1",
+                    "method": "metabuli",
+                    "status": "success",
+                }
+            ],
+            evidence_rows=evidence,
+            methods=("metabuli",),
+        )
+
+        self.assertEqual(rows[0]["detected_expected_species"], "Escherichia coli")
+        self.assertEqual(rows[0]["missed_expected_species"], "Cereibacter sphaeroides")
+        self.assertEqual(rows[0]["additional_species"], "Shigella flexneri")
+        self.assertEqual(rows[0]["comparison_status"], "partial_expected_detection")
 
 
 if __name__ == "__main__":

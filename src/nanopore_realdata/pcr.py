@@ -171,8 +171,10 @@ def build_pcr_concordance(
             continue
         sample_id = str(row.get("sample_id", ""))
         method = str(row.get("method", ""))
+        if not _is_exact_species_evidence(row=row, method=method):
+            continue
         species = canonical_species_name(value=str(row.get("taxon_name", "")))
-        if not species.casefold().startswith("plasmodium "):
+        if not species:
             continue
         species_key = species.casefold()
         detected.setdefault((sample_id, method), {}).setdefault(
@@ -216,10 +218,10 @@ def build_pcr_concordance(
                         truth.include_in_primary_comparison
                     ).lower(),
                     "classifier_status": method_status,
-                    "detected_plasmodium_species": "; ".join(sorted(observed.values())),
+                    "detected_species": "; ".join(sorted(observed.values())),
                     "detected_expected_species": "; ".join(sorted(found)),
                     "missed_expected_species": "; ".join(sorted(missed)),
-                    "additional_plasmodium_species": "; ".join(sorted(additional)),
+                    "additional_species": "; ".join(sorted(additional)),
                     "expected_species_count": str(len(expected)),
                     "detected_expected_species_count": str(len(found)),
                     "expected_species_evidence_count": _display_number(expected_evidence),
@@ -233,6 +235,31 @@ def build_pcr_concordance(
                 }
             )
     return concordance, _summarise_concordance(rows=concordance, methods=methods)
+
+
+def _is_exact_species_evidence(*, row: Mapping[str, Any], method: str) -> bool:
+    """Return whether a normalised row is an exact species-level observation.
+
+    Kraken2 and Metabuli expose strain, species-group and other descendant
+    ranks as species-comparable rows for descriptive reporting. Those rows
+    must not become additional species in truth concordance. Controlled
+    minimap2 and KmerSutra outputs are already normalised at species level.
+
+    Args:
+        row: Normalised evidence record.
+        method: Classifier method name.
+
+    Returns:
+        ``True`` only for the method's exact species-level rank.
+    """
+    rank = str(row.get("rank", "")).strip().casefold()
+    expected_ranks = {
+        "kraken2": {"s"},
+        "metabuli": {"species"},
+        "minimap2": {"controlled_reference"},
+        "kmersutra": {"species_call"},
+    }
+    return rank in expected_ranks.get(method, set())
 
 
 def canonical_species_name(*, value: str) -> str:

@@ -1130,10 +1130,10 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
             "pcr_species_canonical",
             "include_in_primary_comparison",
             "classifier_status",
-            "detected_plasmodium_species",
+            "detected_species",
             "detected_expected_species",
             "missed_expected_species",
-            "additional_plasmodium_species",
+            "additional_species",
             "expected_species_count",
             "detected_expected_species_count",
             "expected_species_evidence_count",
@@ -1182,12 +1182,12 @@ def aggregate_results(*, config_path: Path, completion_path: Path) -> None:
     report_manifest_path = final_root / "report_manifest.json"
     readme_path = final_root / "README.txt"
     pcr_readme = (
-        "pcr_truth.tsv preserves the independent PCR interpretation used for evaluation.\n"
-        "pcr_concordance.tsv compares each method with PCR without converting failures "
+        "pcr_truth.tsv preserves the independent PCR or reference truth used for evaluation.\n"
+        "pcr_concordance.tsv compares each method with truth without converting failures "
         "into biological non-detections.\n"
-        "pcr_method_summary.tsv reports exact counts and denominators by method.\n"
+        "pcr_method_summary.tsv reports exact truth counts and denominators by method.\n"
         if truth_records
-        else "PCR evaluation was not configured; PCR TSV files contain schema headers only.\n"
+        else "Truth evaluation was not configured; truth TSV files contain schema headers only.\n"
     )
     readme_path.write_text(
         "Nanopore real-data workflow final results\n\n"
@@ -1869,7 +1869,6 @@ def _run_minimap2(
                 reference_index=reference_index,
                 input_fastq=input_fastq,
                 threads=workflow.threads_minimap2,
-                preset=workflow.minimap_preset,
             ),
             pigz_command(threads=workflow.threads_minimap2),
         ],

@@ -167,8 +167,8 @@ def generate_html_reports(
         evidence_rows: Normalised method-specific evidence rows.
         warning_rows: Non-fatal parsing and completeness warnings.
         final_root: Final-results directory.
-        pcr_concordance_rows: Per-sample, per-method PCR comparisons.
-        pcr_method_summary_rows: Exact PCR comparison counts by method.
+        pcr_concordance_rows: Per-sample, per-method truth comparisons.
+        pcr_method_summary_rows: Exact truth-comparison counts by method.
 
     Returns:
         Every generated HTML path, ordered from the final report onwards.
@@ -364,22 +364,22 @@ def _render_pcr_report(
     concordance_rows: Sequence[Mapping[str, Any]],
     method_summary_rows: Sequence[Mapping[str, Any]],
 ) -> str:
-    """Render independent PCR concordance without forcing classifier consensus."""
+    """Render independent truth concordance without forcing consensus."""
     if workflow.pcr_truth_path is None:
         body = _hero(
             eyebrow="Optional independent reference",
-            title="PCR evaluation was not configured",
+            title="Truth evaluation was not configured",
             subtitle=(
-                "This classification run has no PCR truth table. Classifier results remain "
+                "This classification run has no independent truth table. Results remain "
                 "available in the method and comparison reports, without an accuracy claim."
             ),
         )
         return _document(
-            title=f"{workflow.run_id} · PCR not configured",
+            title=f"{workflow.run_id} · truth not configured",
             body=body,
             prefix="",
             active="pcr",
-            footer_note="Optional independent PCR evaluation not configured",
+            footer_note="Optional independent truth evaluation not configured",
         )
     primary_samples = {
         str(row.get("sample_id", ""))
@@ -395,17 +395,17 @@ def _render_pcr_report(
     body = (
         _hero(
             eyebrow="Independent reference",
-            title="PCR concordance by classifier",
+            title="Independent truth concordance by classifier",
             subtitle=(
-                "Each method is compared separately with the supplied PCR interpretation; "
+                "Each method is compared separately with the supplied truth interpretation; "
                 "missing or failed classifier runs remain unavailable, not non-detections."
             ),
         )
         + '<section class="metric-grid">'
-        + _metric("Primary PCR samples", len(primary_samples), "Exact sample denominator")
+        + _metric("Primary truth samples", len(primary_samples), "Exact sample denominator")
         + _metric("Available method results", available, f"of {expected} expected")
         + _metric(
-            "Excluded PCR records",
+            "Excluded truth records",
             len(
                 {
                     str(row.get("sample_id", ""))
@@ -428,7 +428,7 @@ def _render_pcr_report(
                 ("all_expected_species_detected_count", "All expected detected"),
                 ("exact_species_match_count", "Exact species match"),
             ),
-            empty_message="No PCR summary is available.",
+            empty_message="No truth summary is available.",
         )
         + "</section>"
         + '<section class="panel"><h2>Per-sample comparison</h2>'
@@ -438,24 +438,24 @@ def _render_pcr_report(
             columns=(
                 ("sample_id", "Sample"),
                 ("method", "Classifier"),
-                ("pcr_species", "PCR species"),
+                ("pcr_species", "Reference species"),
                 ("classifier_status", "Classifier status"),
                 ("detected_expected_species", "Expected detected"),
                 ("missed_expected_species", "Expected missed"),
-                ("additional_plasmodium_species", "Additional Plasmodium"),
-                ("comparison_status", "PCR comparison"),
+                ("additional_species", "Additional species"),
+                ("comparison_status", "Truth comparison"),
             ),
-            empty_message="No PCR concordance rows are available.",
+            empty_message="No truth concordance rows are available.",
             status_columns={"classifier_status"},
         )
         + "</section>"
     )
     return _document(
-        title=f"{workflow.run_id} · PCR concordance",
+        title=f"{workflow.run_id} · truth concordance",
         body=body,
         prefix="",
         active="pcr",
-        footer_note="Independent PCR comparison · exact counts and denominators",
+        footer_note="Independent truth comparison · exact counts and denominators",
     )
 
 
