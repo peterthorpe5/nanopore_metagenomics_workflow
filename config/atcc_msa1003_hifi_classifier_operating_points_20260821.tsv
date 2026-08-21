@@ -1,0 +1,12 @@
+method	setting_id	confidence	min_score	min_sp_score	precise	reuse_existing	setting_context	description
+kraken2	confidence_0p00	0.00				true	software_default	Kraken2 documented default and most permissive confidence setting
+kraken2	confidence_0p05	0.05				false	predeclared_sweep	Low non-zero Kraken2 confidence threshold
+kraken2	confidence_0p10	0.10				false	predeclared_sweep	Moderate Kraken2 confidence threshold
+kraken2	confidence_0p20	0.20				false	predeclared_sweep	Higher Kraken2 confidence threshold
+kraken2	confidence_0p50	0.50				false	predeclared_sweep	Stringent Kraken2 confidence threshold
+metabuli	default_min0p000_sp0p000		0.000	0.000	0	false	software_default	Metabuli documented maximum-sensitivity default
+metabuli	previous_min0p008_sp0p000		0.008	0.000	0	true	previous_ont_setting	Existing run using the documented Oxford Nanopore min-score recommendation
+metabuli	hifi_score_min0p070_sp0p000		0.070	0.000	0	false	hifi_score_only	PacBio HiFi minimum-score threshold without species-rank threshold
+metabuli	hifi_thresholds_min0p070_sp0p300		0.070	0.300	0	false	hifi_explicit_thresholds	Explicit PacBio HiFi precision thresholds from the Metabuli guidance
+metabuli	hifi_precise_preset2				2	false	hifi_recommended_current	Current Metabuli v1.2 HiFi precise preset
+metabuli	strict_min0p100_sp0p300		0.100	0.300	0	false	predeclared_strict	Stricter Metabuli sensitivity-analysis setting

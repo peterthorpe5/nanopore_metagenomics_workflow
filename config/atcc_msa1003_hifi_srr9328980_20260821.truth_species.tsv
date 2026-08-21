@@ -1,0 +1,21 @@
+benchmark_id	organism_id	species_name	accepted_species_names	expected	expected_abundance_fraction	abundance_tier	ncbi_taxid	truth_strain	truth_assembly_accessions	truth_sequence_accessions	truth_fasta	truth_fasta_sha256	source
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_17978	Acinetobacter baumannii		true	0.0018	tier_0p18_percent	470	ATCC 17978		NZ_CP009257.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_17982	Actinomyces odontolyticus	Schaalia odontolytica	true	0.0002	tier_0p02_percent	1660	ATCC 17982		NZ_DS264586.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_10987	Bacillus cereus		true	0.018	tier_1p8_percent	1396	ATCC 10987		NC_003909.8			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_8482	Bacteroides vulgatus	Phocaeicola vulgatus	true	0.0002	tier_0p02_percent	821	ATCC 8482		NC_009614.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_15703	Bifidobacterium adolescentis		true	0.0002	tier_0p02_percent	1680	ATCC 15703		NC_008618.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_35702	Clostridium beijerinckii		true	0.018	tier_1p8_percent	1520	ATCC 35702		NC_009617.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_BAA-816	Deinococcus radiodurans		true	0.0002	tier_0p02_percent	1299	ATCC BAA-816		NC_001263.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_47077	Enterococcus faecalis		true	0.0002	tier_0p02_percent	1351	ATCC 47077		NC_017316.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_700926	Escherichia coli		true	0.18	tier_18_percent	562	ATCC 700926		NC_000913.3			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_700392	Helicobacter pylori		true	0.0018	tier_0p18_percent	210	ATCC 700392		NC_000915.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_33323	Lactobacillus gasseri		true	0.0018	tier_0p18_percent	1596	ATCC 33323		NC_008530.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_BAA-335	Neisseria meningitidis	Neisseria meningitides	true	0.0018	tier_0p18_percent	487	ATCC BAA-335		NC_003112.2			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_33277	Porphyromonas gingivalis		true	0.18	tier_18_percent	837	ATCC 33277		NC_010729.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_11828	Cutibacterium acnes	Propionibacterium acnes	true	0.0018	tier_0p18_percent	1747	ATCC 11828		NC_006085.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_9027	Pseudomonas aeruginosa		true	0.018	tier_1p8_percent	287	ATCC 9027		NC_009656.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_17029	Rhodobacter sphaeroides	Cereibacter sphaeroides	true	0.18	tier_18_percent	1063	ATCC 17029		NZ_AKVW01000001.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_BAA-1556	Staphylococcus aureus		true	0.018	tier_1p8_percent	1280	ATCC BAA-1556		NC_007795.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_12228	Staphylococcus epidermidis		true	0.18	tier_18_percent	1282	ATCC 12228		NC_004461.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_BAA-611	Streptococcus agalactiae		true	0.018	tier_1p8_percent	1311	ATCC BAA-611		NC_004116.1			ATCC MSA-1003 published composition
+atcc_msa1003_hifi_srr9328980_locked_v1	ATCC_700610	Streptococcus mutans		true	0.18	tier_18_percent	1309	ATCC 700610		NC_004350.2			ATCC MSA-1003 published composition
