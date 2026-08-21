@@ -1,0 +1,139 @@
+schema_version: 3
+
+run:
+  id: atcc_msa1003_hifi_comparators_srr9328980_20260817
+  output_directory: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/benchmarks/comparators_atcc_msa1003_hifi/atcc_msa1003_hifi_comparators_srr9328980_20260817
+
+deployment:
+  expected_repository_root: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/2026_plasmodium_kraken_sensitivity/nanopore_metagenomics_workflow
+  expected_package_version: 0.4.4
+  conda_environment: nanopore_realdata_workflow
+
+inputs:
+  samples: atcc_msa1003_hifi_srr9328980_20260817.samples.tsv
+  pcr_truth: atcc_msa1003_hifi_srr9328980_20260818.reference_truth.tsv
+  read_state: host_removed
+
+host:
+  reference: ""
+  index: ""
+
+databases:
+  kraken2: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/databases/kmersutra_db/atcc_msa1003_heldout_v1/kraken2_matched_475genomes_v1
+  metabuli: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/databases/metabuli/custom_metabuli_db
+  kmersutra_panel: ""
+
+minimap2:
+  genome_config: /gpfs/uod-scale-01/cluster/gjb_lab/pthorpe001/databases/kmersutra_db/atcc_msa1003_heldout_v1/kmersutra_genome_config.tsv
+  reference: ""
+  preset: map-hifi
+  required_species:
+    - Acinetobacter baumannii
+    - Schaalia odontolytica
+    - Bacillus cereus
+    - Phocaeicola vulgatus
+    - Bifidobacterium adolescentis
+    - Clostridium beijerinckii
+    - Deinococcus radiodurans
+    - Enterococcus faecalis
+    - Escherichia coli
+    - Helicobacter pylori
+    - Lactobacillus gasseri
+    - Neisseria meningitidis
+    - Porphyromonas gingivalis
+    - Cutibacterium acnes
+    - Pseudomonas aeruginosa
+    - Cereibacter sphaeroides
+    - Staphylococcus aureus
+    - Staphylococcus epidermidis
+    - Streptococcus agalactiae
+    - Streptococcus mutans
+  index: ""
+  min_mapq: 15
+  min_alignment: 500
+  maximum_reference_bases: 12000000000
+  index_batch_size_bases: 16000000000
+  maximum_index_bytes: 64000000000
+  failure_policy: continue
+
+execution:
+  scratch_root: /tmp
+  stage_resources: true
+  minimum_scratch_gb: 150
+  keep_non_host_fastq: false
+  keep_per_read_classifications: true
+
+resources:
+  host_threads: 4
+  kraken2_threads: 12
+  metabuli_threads: 12
+  minimap2_threads: 12
+  kmersutra_threads: 4
+  host_memory_mb: 16000
+  kraken2_memory_mb: 409600
+  metabuli_memory_mb: 160000
+  minimap2_memory_mb: 160000
+  kmersutra_memory_mb: 16000
+  host_runtime_minutes: 1440
+  kraken2_runtime_minutes: 2880
+  metabuli_runtime_minutes: 2880
+  minimap2_runtime_minutes: 2880
+  kmersutra_runtime_minutes: 60
+
+slurm:
+  account: barton
+  partition: barton
+  default_qos: ""
+  kmersutra_qos: 4week
+  array_concurrency:
+    kraken2: 1
+    metabuli: 1
+    minimap2: 1
+    kmersutra: 1
+
+kraken2:
+  confidence: 0.0
+  failure_policy: fail
+
+metabuli:
+  min_score: 0.008
+  max_ram_gb: 120
+  failure_policy: continue
+
+kmersutra:
+  enabled: false
+  failure_policy: continue
+  timeout_minutes: 50
+  screen_preset: exact
+  call_preset: lineage_aware
+  same_genus_reportable_min_fraction: 0.05
+  write_parquet_outputs: false
+
+provenance:
+  checksum_inputs: true
+
+reporting:
+  focus_taxa:
+    - Hammondia hammondi
+    - Acinetobacter baumannii
+    - Schaalia odontolytica
+    - Bacillus cereus
+    - Phocaeicola vulgatus
+    - Bifidobacterium adolescentis
+    - Clostridium beijerinckii
+    - Deinococcus radiodurans
+    - Enterococcus faecalis
+    - Escherichia coli
+    - Helicobacter pylori
+    - Lactobacillus gasseri
+    - Neisseria meningitidis
+    - Porphyromonas gingivalis
+    - Cutibacterium acnes
+    - Pseudomonas aeruginosa
+    - Cereibacter sphaeroides
+    - Staphylococcus aureus
+    - Staphylococcus epidermidis
+    - Streptococcus agalactiae
+    - Streptococcus mutans
+  top_n: 50
+  max_table_rows: 10000
