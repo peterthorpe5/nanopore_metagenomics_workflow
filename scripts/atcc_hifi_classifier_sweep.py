@@ -323,6 +323,8 @@ def build_classifier_command(
     command = [
         "metabuli",
         "classify",
+        "--seq-mode",
+        "3",
         str(input_fastq),
         str(database),
         str(staging_directory),

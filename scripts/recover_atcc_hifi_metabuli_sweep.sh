@@ -3,19 +3,28 @@
 set -Eeuo pipefail
 
 MODE=""
+KRAKEN2_JOB_ID=""
 
 usage() {
     printf '%s\n' \
-        'Usage: submit_atcc_hifi_classifier_sweep.sh --mode plan|submit' \
+        'Usage: recover_atcc_hifi_metabuli_sweep.sh OPTIONS' \
         '' \
-        'plan    validates every input and prints the intended Slurm jobs' \
-        'submit  submits Kraken2, Metabuli and dependent summary jobs'
+        'Required options:' \
+        '  --mode plan|submit' \
+        '  --kraken2-job-id JOB_ID' \
+        '' \
+        'This recovery submits only the five Metabuli operating points and' \
+        'a summary job that also waits for the existing Kraken2 array.'
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode)
             MODE="${2:?Missing value for --mode}"
+            shift 2
+            ;;
+        --kraken2-job-id)
+            KRAKEN2_JOB_ID="${2:?Missing value for --kraken2-job-id}"
             shift 2
             ;;
         --help|-h)
@@ -32,6 +41,10 @@ done
 
 [[ "${MODE}" == plan || "${MODE}" == submit ]] || {
     printf 'ERROR: --mode must be plan or submit\n' >&2
+    exit 2
+}
+[[ "${KRAKEN2_JOB_ID}" =~ ^[0-9]+$ ]] || {
+    printf 'ERROR: --kraken2-job-id must be numeric\n' >&2
     exit 2
 }
 
@@ -73,10 +86,6 @@ require_directory "${REPOSITORY_ROOT}"
 require_directory "${RUN_ROOT}"
 require_directory "${KRAKEN2_DATABASE}"
 require_directory "${METABULI_DATABASE}"
-require_file "${KRAKEN2_DATABASE}/matched_database.complete.json"
-require_file "${KRAKEN2_DATABASE}/hash.k2d"
-require_file "${KRAKEN2_DATABASE}/opts.k2d"
-require_file "${KRAKEN2_DATABASE}/taxo.k2d"
 require_file "${INPUT_FASTQ}"
 require_file "${MANIFEST}"
 require_file "${TRUTH_MANIFEST}"
@@ -86,56 +95,32 @@ require_file "${SWEEP_SCRIPT}"
 require_file "${TASK_SCRIPT}"
 require_file "${SUMMARY_SCRIPT}"
 
-KRAKEN2_HELP="$(
-    conda run --no-capture-output --name "${CONDA_ENVIRONMENT}" \
-        kraken2 --help 2>&1 || true
-)"
-[[ "${KRAKEN2_HELP}" == *"--confidence"* ]] || {
-    printf 'ERROR: the configured Kraken2 lacks --confidence support\n' >&2
-    exit 2
-}
-
 METABULI_HELP="$(
     conda run --no-capture-output --name "${CONDA_ENVIRONMENT}" \
         metabuli classify -h 2>&1 || true
 )"
-[[ "${METABULI_HELP}" == *"--precise"* ]] || {
-    printf 'ERROR: the configured Metabuli lacks the v1.2 --precise option\n' >&2
-    exit 2
-}
-[[ "${METABULI_HELP}" == *"--seq-mode"* ]] || {
-    printf 'ERROR: the configured Metabuli lacks --seq-mode support\n' >&2
-    exit 2
-}
-[[ "${METABULI_HELP}" == *"--min-sp-score"* ]] || {
-    printf 'ERROR: the configured Metabuli lacks --min-sp-score support\n' >&2
-    exit 2
-}
+for REQUIRED_OPTION in --seq-mode --precise --min-score --min-sp-score; do
+    [[ "${METABULI_HELP}" == *"${REQUIRED_OPTION}"* ]] || {
+        printf 'ERROR: the configured Metabuli lacks %s support\n' \
+            "${REQUIRED_OPTION}" >&2
+        exit 2
+    }
+done
 
 python3 "${SWEEP_SCRIPT}" \
     --action validate-manifest \
     --manifest "${MANIFEST}" \
     --verbose
 
-KRAKEN2_TASK_COUNT="$(
-    python3 "${SWEEP_SCRIPT}" \
-        --action task-count \
-        --manifest "${MANIFEST}" \
-        --method kraken2
-)"
 METABULI_TASK_COUNT="$(
     python3 "${SWEEP_SCRIPT}" \
         --action task-count \
         --manifest "${MANIFEST}" \
         --method metabuli
 )"
-
-[[ "${KRAKEN2_TASK_COUNT}" =~ ^[1-9][0-9]*$ ]] || {
-    printf 'ERROR: invalid Kraken2 task count: %s\n' "${KRAKEN2_TASK_COUNT}" >&2
-    exit 2
-}
 [[ "${METABULI_TASK_COUNT}" =~ ^[1-9][0-9]*$ ]] || {
-    printf 'ERROR: invalid Metabuli task count: %s\n' "${METABULI_TASK_COUNT}" >&2
+    printf 'ERROR: invalid Metabuli task count: %s\n' \
+        "${METABULI_TASK_COUNT}" >&2
     exit 2
 }
 
@@ -147,15 +132,11 @@ fi
 
 mkdir -p "${LOG_DIRECTORY}" "${SWEEP_ROOT}"
 
-printf 'ATCC HiFi classifier operating-point plan:\n'
-printf '  matched Kraken2 database: %s\n' "${KRAKEN2_DATABASE}"
-printf '  existing Kraken2 baseline: confidence 0.00\n'
-printf '  new Kraken2 tasks: %s (0.05, 0.10, 0.20, 0.50)\n' "${KRAKEN2_TASK_COUNT}"
-printf '  Metabuli database: %s\n' "${METABULI_DATABASE}"
-printf '  existing Metabuli baseline: min-score 0.008, min-sp-score 0\n'
-printf '  new Metabuli tasks: %s\n' "${METABULI_TASK_COUNT}"
-printf '  explicit HiFi Metabuli thresholds: min-score 0.07, min-sp-score 0.3\n'
-printf '  current Metabuli v1.2 HiFi mode: --precise 2\n'
+printf 'ATCC HiFi Metabuli recovery plan:\n'
+printf '  existing Kraken2 array: %s (not resubmitted)\n' "${KRAKEN2_JOB_ID}"
+printf '  Metabuli sequence mode: 3 (long read)\n'
+printf '  Metabuli operating points to run: %s\n' "${METABULI_TASK_COUNT}"
+printf '  final summary waits for Kraken2 and Metabuli\n'
 printf '  output root: %s\n' "${SWEEP_ROOT}"
 
 if [[ "${MODE}" == plan ]]; then
@@ -168,39 +149,12 @@ command -v sbatch >/dev/null 2>&1 || {
     exit 2
 }
 
-KRAKEN2_LAST_INDEX="$((KRAKEN2_TASK_COUNT - 1))"
 METABULI_LAST_INDEX="$((METABULI_TASK_COUNT - 1))"
-
-KRAKEN2_JOB_ID="$(
-    sbatch --parsable \
-        --account=barton \
-        --partition=barton \
-        --job-name=NRD_k2sweep \
-        --chdir="${REPOSITORY_ROOT}" \
-        --array="0-${KRAKEN2_LAST_INDEX}%1" \
-        --cpus-per-task=12 \
-        --mem=409600M \
-        --time=1440 \
-        --signal=B:TERM@300 \
-        --output="${LOG_DIRECTORY}/%x.%A_%a.out" \
-        --error="${LOG_DIRECTORY}/%x.%A_%a.err" \
-        "${TASK_SCRIPT}" \
-        --repository-root "${REPOSITORY_ROOT}" \
-        --conda-environment "${CONDA_ENVIRONMENT}" \
-        --method kraken2 \
-        --manifest "${MANIFEST}" \
-        --input-fastq "${INPUT_FASTQ}" \
-        --database "${KRAKEN2_DATABASE}" \
-        --output-root "${SWEEP_ROOT}" \
-        --threads 12 \
-        --max-ram-gb 120
-)"
-
 METABULI_JOB_ID="$(
     sbatch --parsable \
         --account=barton \
         --partition=barton \
-        --job-name=NRD_mbsweep \
+        --job-name=NRD_mbsweep_fix \
         --chdir="${REPOSITORY_ROOT}" \
         --array="0-${METABULI_LAST_INDEX}%2" \
         --cpus-per-task=12 \
@@ -225,7 +179,7 @@ SUMMARY_JOB_ID="$(
     sbatch --parsable \
         --account=barton \
         --partition=barton \
-        --job-name=NRD_opsum \
+        --job-name=NRD_opsum_fix \
         --chdir="${REPOSITORY_ROOT}" \
         --cpus-per-task=2 \
         --mem=8192M \
@@ -245,8 +199,8 @@ SUMMARY_JOB_ID="$(
         --output-directory "${SUMMARY_DIRECTORY}"
 )"
 
-printf 'Submitted ATCC HiFi classifier operating-point sweep:\n'
-printf '  Kraken2 array: %s\n' "${KRAKEN2_JOB_ID}"
-printf '  Metabuli array: %s\n' "${METABULI_JOB_ID}"
-printf '  Summary job:    %s\n' "${SUMMARY_JOB_ID}"
-printf 'Existing baseline results and both databases were preserved.\n'
+printf 'Submitted corrected Metabuli recovery:\n'
+printf '  existing Kraken2 array: %s\n' "${KRAKEN2_JOB_ID}"
+printf '  Metabuli array:         %s\n' "${METABULI_JOB_ID}"
+printf '  replacement summary:    %s\n' "${SUMMARY_JOB_ID}"
+printf 'Kraken2 and the existing baseline reports were not modified.\n'

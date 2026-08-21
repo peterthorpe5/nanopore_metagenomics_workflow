@@ -142,6 +142,7 @@ class CommandConstructionTests(unittest.TestCase):
             max_ram_gb=120,
         )
         self.assertEqual(command[:2], ["metabuli", "classify"])
+        self.assertEqual(command[command.index("--seq-mode") + 1], "3")
         self.assertEqual(command[command.index("--min-score") + 1], "0.07")
         self.assertEqual(command[command.index("--min-sp-score") + 1], "0.3")
 
@@ -165,6 +166,7 @@ class CommandConstructionTests(unittest.TestCase):
             threads=12,
             max_ram_gb=120,
         )
+        self.assertEqual(command[command.index("--seq-mode") + 1], "3")
         self.assertEqual(command[command.index("--precise") + 1], "2")
         self.assertNotIn("--min-score", command)
         self.assertNotIn("--min-sp-score", command)
@@ -267,8 +269,9 @@ class ClassifierExecutionTests(unittest.TestCase):
             report_path.write_text(self.report_text(), encoding="utf-8")
             output_path.write_text("C\tread\t101\n", encoding="utf-8")
         elif command[:2] == ["metabuli", "classify"]:
-            output_directory = Path(command[4])
-            setting_id = command[5]
+            input_index = command.index("--seq-mode") + 2
+            output_directory = Path(command[input_index + 2])
+            setting_id = command[input_index + 3]
             (output_directory / f"{setting_id}_report.tsv").write_text(
                 self.report_text(),
                 encoding="utf-8",
